@@ -1,0 +1,3458 @@
+{
+  "name": "sdr",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        1424,
+        2912
+      ],
+      "id": "b705eb89-35af-46d4-9888-ace159e278aa",
+      "name": "OpenRouter Chat Model",
+      "credentials": {
+        "openRouterApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('global_var').item.json.telefone }}",
+        "tableName": "n8n_chat_histories",
+        "contextWindowLength": 30
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryPostgresChat",
+      "typeVersion": 1.3,
+      "position": [
+        1600,
+        2912
+      ],
+      "id": "0f9dbd33-76ce-4fd1-904f-112c71badb26",
+      "name": "Postgres Chat Memory",
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "description": "Calcula o preço final (unitário e total) de placas de sinalização PERSONALIZADAS da Sinaliza Pro. A ferramenta já aplica as faixas de preço por tamanho, os valores mínimos, a quantidade e checa o limite da chapa — você NUNCA deve calcular manualmente. Use sempre que tiver material, tipo e medidas, seja para validar o tamanho ou para gerar o orçamento.\n\nCampos da query:\n- material (texto, obrigatório): \"PVC\", \"ACM\", \"Aço\", \"Acrílico 2mm\", \"Acrílico 3mm\", \"Acrílico 4mm\", \"Acrílico 5mm\", \"Acrílico 10mm\" ou \"Lona\". Para acrílico, sempre inclua a espessura.\n- tipo (texto, obrigatório): \"Normal\", \"Refletiva\", \"Fotoluminescente\" ou \"Impressão UV\".\n- largura (número, obrigatório): em centímetros.\n- altura (número, obrigatório): em centímetros.\n- quantidade (número, opcional, padrão 1).\n- placa_endereco (booleano, opcional): true apenas para placa de endereço (mínimo R$ 100).\n\nObservações: Aço já é refletivo de fábrica; Acrílico e Lona não têm versão refletiva (nesses casos o preço sai como Normal); \"Impressão UV\" tem o mesmo preço do Normal.\n\nNÃO use esta ferramenta para placas de trânsito padrão CONTRAN (PARE/R-1, R-2, R-3 a R-40, placa de aço 50×50 refletiva) nem para itens do catálogo (cones, suportes, tachões, fitas, adesivos etc.) — para esses use a ferramenta calcular_preco_item.\n\nRetorna JSON: { ok, valor_unitario, valor_total, dentro_do_limite, excede_chapa, observacao } ou { ok:false, erro }. Se ok=false ou excede_chapa=true, não gere orçamento.\n",
+        "jsCode": "/* ============================================================================\n   FERRAMENTA (Tool) — calcular_preco_placa   |   Sinaliza Pro\n   *** ATENÇÃO: esta tabela de preços existe nos 3 nodes de preço (placa, item e orçamento PDF). Ao alterar valores, atualize os três. ***\n   Tabela de Preços 2026. Entrada: objeto `query`. Saída: string JSON.\n============================================================================ */\n\n// ─────────────────────────── PLACAS PERSONALIZADAS ───────────────────────────\n// Preço/m² de referência (faixa \"100\") por material+acabamento; ±5% por faixa\n// de tamanho pelo MAIOR lado; mínimos por material; limite de chapa.\nconst TAXA = 0.05;\nconst FAIXAS = [\n  [0, 4], [30, 3], [40, 2], [60, 1], [100, 0], [130, -1], [170, -2],\n];\nconst MATERIAIS = {\n  \"PVC\":           { nome:\"PVC\",           desc:\"chapa de PVC expandido\",              banda:\"larga\",    min:25, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":550,  \"Refletiva\":880,  \"Fotoluminescente\":880,  \"Impressao UV\":550 } },\n  \"ACM\":           { nome:\"ACM\",           desc:\"chapa de ACM\",                        banda:\"larga\",    min:25, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":700,  \"Refletiva\":1040,  \"Fotoluminescente\":1040,  \"Impressao UV\":700 } },\n  \"Aco\":           { nome:\"Aço\",           desc:\"chapa de aço, pintura eletrostática\", banda:\"larga\",    min:40, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":710,  \"Refletiva\":710,  \"Fotoluminescente\":710,  \"Impressao UV\":710 } },\n  \"Acrilico 2mm\":  { nome:\"Acrílico 2mm\",  desc:\"acrílico 2 mm\",                       banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":970,  \"Refletiva\":970,  \"Fotoluminescente\":970,  \"Impressao UV\":970 } },\n  \"Acrilico 3mm\":  { nome:\"Acrílico 3mm\",  desc:\"acrílico 3 mm\",                       banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":1170,  \"Refletiva\":1170,  \"Fotoluminescente\":1170,  \"Impressao UV\":1170 } },\n  \"Acrilico 4mm\":  { nome:\"Acrílico 4mm\",  desc:\"acrílico 4 mm\",                       banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":1040,  \"Refletiva\":1040,  \"Fotoluminescente\":1040,  \"Impressao UV\":1040 } },\n  \"Acrilico 5mm\":  { nome:\"Acrílico 5mm\",  desc:\"acrílico 5 mm\",                       banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":1340, \"Refletiva\":1340, \"Fotoluminescente\":1340, \"Impressao UV\":1340 } },\n  \"Acrilico 10mm\": { nome:\"Acrílico 10mm\", desc:\"acrílico 10 mm\",                      banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":1680, \"Refletiva\":1680, \"Fotoluminescente\":1680, \"Impressao UV\":1680 } },\n  \"Lona\":          { nome:\"Lona\",          desc:\"lona\",                                banda:\"fixa\",     min:95, minPlacaEnd:100, largMax:320, altMax:5000,\n                     tipos:{ \"Normal\":370,  \"Refletiva\":370,  \"Fotoluminescente\":370,  \"Impressao UV\":370 } },\n};\nconst TIPO_NOME = { \"Normal\":\"Normal\", \"Refletiva\":\"Refletiva\", \"Fotoluminescente\":\"Fotoluminescente\", \"Impressao UV\":\"Impressão UV\" };\n\n// ─────────────────────────── ITENS DE CATÁLOGO (Tabela 2026) ───────────────────────────\n// Preço UNITÁRIO por faixa de QUANTIDADE (limites inclusivos). Valores FICTÍCIOS de exemplo (demo): substitua pela sua própria tabela de preços.\n// célula a célula do PDF oficial — NÃO derivar por fórmula, NÃO \"corrigir\" anomalias.\n// porM2: preço é por m² (exige largura×altura), mínimo R$ 15,00 por peça.\nconst FAIXAS_QTD = [\n  { min: 1,  max: 1,   rotulo: \"1\"      },\n  { min: 2,  max: 5,   rotulo: \"2-5\"    },\n  { min: 6,  max: 10,  rotulo: \"6-10\"   },\n  { min: 11, max: 20,  rotulo: \"11-20\"  },\n  { min: 21, max: 40,  rotulo: \"21-40\"  },\n  { min: 41, max: 50,  rotulo: \"41-50\"  },\n  { min: 51, max: 100, rotulo: \"51-100\" },\n];\nconst QTD_MAX_ITEM = 100;\nconst MINIMO_ADESIVO = 15;\n\nconst CATALOGO = {\n  \"abracadeira_40cm\": {\n    nome: \"Abraçadeira de 40 cm\",\n    specs: [\"Abraçadeira para fixação de placa em poste\", \"Tamanho: 40 cm\"],\n    precos: [75.90, 74.39, 72.87, 71.35, 68.43, 68.31, 66.80],\n  },\n  \"abracadeira_50cm\": {\n    nome: \"Abraçadeira de 50 cm\",\n    specs: [\"Abraçadeira para fixação de placa em poste\", \"Tamanho: 50 cm\"],\n    precos: [75.51, 74.00, 72.49, 70.98, 68.08, 67.96, 66.45],\n  },\n  \"adesivo_recorte\": {\n    nome: \"Adesivo de recorte\", porM2: true,\n    specs: [\"Adesivo vinil de recorte\", \"Valor por m²\"],\n    precos: [225.96, 221.45, 216.93, 212.41, 203.73, 203.37, 198.85],\n  },\n  \"adesivo_impresso\": {\n    nome: \"Adesivo impresso\", porM2: true,\n    specs: [\"Adesivo vinil impresso\", \"Valor por m²\"],\n    precos: [271.49, 266.06, 260.63, 255.20, 244.77, 244.34, 238.91],\n  },\n  \"bate_rodas\": {\n    nome: \"Bate-rodas em resina\",\n    specs: [\"Bate-rodas em resina\", \"Dimensões: 49 × 17 × 8,5 cm\"],\n    precos: [127.92, 125.36, 122.80, 120.24, 115.33, 115.13, 112.57],\n  },\n  \"cone_balizador_118cm\": {\n    nome: \"Cone balizador laranja com faixa refletiva, 118 cm\",\n    specs: [\"Cone balizador laranja com faixas refletivas (94 mm)\", \"Altura: 118 cm · base 40 cm\"],\n    precos: [204.56, 200.47, 196.38, 192.29, 184.43, 184.10, 180.01],\n  },\n  \"cone_flexivel_75cm\": {\n    nome: \"Cone de PVC flexível 75 cm (NBR 15.071)\",\n    specs: [\"Cone para sinalização viária em PVC flexível\", \"Duas faixas refletivas brancas tipo colmeia\", \"Altura: 75 cm · peso 3 a 4 kg · atende NBR 15.071\"],\n    precos: [115.85, 113.53, 111.22, 108.90, 104.45, 104.27, 101.95],\n  },\n  \"cone_rigido_75cm\": {\n    nome: \"Cone de PVC rígido 75 cm\",\n    specs: [\"Cone para sinalização viária em PVC rígido\", \"Duas faixas refletivas brancas tipo colmeia\", \"Altura: 75 cm\"],\n    precos: [49.97, 48.98, 47.98, 46.98, 45.06, 44.98, 43.98],\n  },\n  \"corrente_pedestal_grande\": {\n    nome: \"Corrente para pedestal — grande\",\n    specs: [\"Corrente plástica para pedestal\", \"Tamanho grande\"],\n    precos: [10.38, 10.18, 9.97, 9.76, 9.36, 9.34, 9.14],\n  },\n  \"corrente_pedestal_pequena\": {\n    nome: \"Corrente para pedestal — pequena\",\n    specs: [\"Corrente plástica para pedestal\", \"Tamanho pequeno\"],\n    precos: [6.95, 6.82, 6.68, 6.54, 6.27, 6.26, 6.12],\n  },\n  \"pedestal_zebrado\": {\n    nome: \"Pedestal zebrado com placa 30×40 cm personalizada\",\n    specs: [\"Pedestal zebrado\", \"Placa 30 × 40 cm personalizada inclusa\"],\n    precos: [160.26, 152.24, 147.44, 141.03, 130.93, 136.22, 128.20],\n  },\n  \"placa_aco_50x50_refletiva\": {\n    nome: \"Placa de aço 50×50 cm com adesivo refletivo\",\n    specs: [\"Chapa de aço galvanizada nº 18 (1,25 mm), pintura eletrostática\", \"Revestimento em adesivo refletivo\", \"Dimensões: 50 × 50 cm — sem instalação\"],\n    precos: [270.11, 256.60, 248.50, 237.69, 220.68, 229.59, 216.08],\n  },\n  \"placa_transito_r1\": {\n    nome: \"Placa de trânsito R-1 (PARE) octogonal 60×60 cm\",\n    specs: [\"Chapa de aço galvanizada nº 18 (1,25 mm), pintura eletrostática\", \"Adesivo vinil refletivo (5 anos), padrão CONTRAN\", \"Octogonal 60 × 60 cm — sem instalação\"],\n    precos: [423.74, 415.27, 406.79, 398.32, 382.04, 381.37, 372.89],\n  },\n  \"placa_transito_r2\": {\n    nome: \"Placa de trânsito R-2 triangular 75×75×75 cm\",\n    specs: [\"Chapa de aço galvanizada nº 18 (1,25 mm), pintura eletrostática\", \"Adesivo vinil refletivo importado (5 anos), padrão CONTRAN\", \"Triangular 75 × 75 × 75 cm — sem instalação\"],\n    precos: [534.77, 508.03, 491.99, 470.60, 436.91, 454.55, 427.82],\n  },\n  \"placa_transito_r3_a_r40\": {\n    nome: \"Placa de trânsito R-3 a R-40 redonda ⌀50 cm\",\n    specs: [\"Chapa de aço galvanizada nº 18 (1,25 mm), pintura eletrostática\", \"Adesivo vinil refletivo importado (7 anos), padrão CONTRAN\", \"Redonda ⌀ 50 cm · verso preto fosco — sem instalação\"],\n    precos: [225.64, 221.13, 216.61, 212.10, 203.44, 203.08, 198.56],\n  },\n  \"suporte_madeira_3m\": {\n    nome: \"Suporte para placa em madeira, 3 metros\",\n    specs: [\"Suporte para placa em madeira\", \"Comprimento: 3 metros\"],\n    precos: [126.48, 123.95, 121.42, 118.89, 114.03, 113.83, 111.30],\n  },\n  \"suporte_tubo_aco_3m\": {\n    nome: \"Suporte para placa em tubo de aço 2,5\\\", 3 metros\",\n    specs: [\"Suporte para placa em tubo de aço 2,5\\\"\", \"Comprimento: 3 metros\"],\n    precos: [278.93, 273.35, 267.77, 262.19, 251.48, 251.03, 245.45],\n  },\n  \"tachao_com_instalacao\": {\n    nome: \"Tachão birefletivo — com instalação\",\n    specs: [\"Tachão birefletivo em resina, trapezoidal\", \"Dimensões: 25 × 15 × 5 cm\", \"Com instalação\"],\n    precos: [135.24, 132.54, 129.83, 127.13, 121.94, 121.72, 119.01],\n  },\n  \"tachao_sem_instalacao\": {\n    nome: \"Tachão birefletivo — sem instalação\",\n    specs: [\"Tachão birefletivo em resina, trapezoidal\", \"Dimensões: 25 × 15 × 5 cm\", \"Sem instalação\"],\n    precos: [58.91, 57.73, 56.55, 55.38, 53.12, 53.02, 51.84],\n  },\n  \"tachinha_com_instalacao\": {\n    nome: \"Tachinha refletiva amarela — com instalação\",\n    specs: [\"Tachinha refletiva em resina, monodirecional\", \"Cor amarela\", \"Com instalação\"],\n    precos: [87.79, 86.04, 84.28, 82.53, 79.15, 79.02, 77.26],\n  },\n  \"tachinha_sem_instalacao\": {\n    nome: \"Tachinha refletiva amarela — sem instalação\",\n    specs: [\"Tachinha refletiva em resina, monodirecional\", \"Cor amarela\", \"Sem instalação\"],\n    precos: [63.31, 62.05, 60.78, 59.51, 57.08, 56.98, 55.72],\n  },\n  \"cavalete_dupla_face\": {\n    nome: \"Cavalete dupla face amarelo\",\n    specs: [\"Cavalete de sinalização dupla face\", \"Cor amarela\"],\n    precos: [91.07, 86.51, 83.78, 80.14, 74.41, 77.41, 72.85],\n  },\n  \"fita_zebrada\": {\n    nome: \"Fita zebrada\",\n    specs: [\"Fita zebrada para isolamento de área (rolo)\"],\n    precos: [21.48, 20.40, 19.76, 18.90, 17.55, 18.25, 17.18],\n  },\n  \"fita_amarela_vermelha\": {\n    nome: \"Fita amarela/vermelha\",\n    specs: [\"Fita amarela/vermelha para isolamento de área (rolo)\"],\n    precos: [28.99, 27.54, 26.67, 25.51, 23.69, 24.64, 23.19],\n  },\n};\n\n// ─────────────────────────── HELPERS ───────────────────────────\nconst norm = s => String(s ?? \"\").normalize(\"NFD\").replace(/[̀-ͯ]/g, \"\").toLowerCase().trim();\n\n// formata em reais SEM depender de Intl (seguro no sandbox da ferramenta)\nfunction brl(v){\n  const [i, d] = Number(v).toFixed(2).split(\".\");\n  return \"R$ \" + i.replace(/\\B(?=(\\d{3})+(?!\\d))/g, \".\") + \",\" + d;\n}\nfunction round2(v){ return Math.round((v + Number.EPSILON) * 100) / 100; }\nfunction numCm(v){\n  if (typeof v === \"number\") return v;\n  const s = String(v).toLowerCase().replace(\",\", \".\");\n  const n = parseFloat(s.replace(/[^0-9.]/g, \"\"));\n  if (isNaN(n)) return NaN;\n  if (/m\\s*$/.test(s) && !/[cm]m\\s*$/.test(s)) return n * 100; // sufixo \"m\" isolado = metros: \"1,5m\" -> 150\n  return n;\n}\n\n// ─────────────────────────── CÁLCULO DE PLACAS ───────────────────────────\nfunction acharMaterial(txt){\n  const t = norm(txt);\n  if (t.includes(\"pvc\")) return \"PVC\";\n  if (t.includes(\"acm\")) return \"ACM\";\n  if (t.includes(\"acril\")) {\n    const mm  = (t.match(/(\\d+)\\s*mm/) || [])[1];\n    const esp = [\"2\",\"3\",\"4\",\"5\",\"10\"].includes(mm) ? mm : \"2\"; // sem espessura => 2mm\n    return \"Acrilico \" + esp + \"mm\";\n  }\n  if (t.includes(\"lona\")) return \"Lona\";\n  if (t.includes(\"aco\") || t.includes(\"metal\")) return \"Aco\";\n  return null;\n}\nfunction acharTipo(txt){\n  const t = norm(txt);\n  if (t.includes(\"reflet\")) return \"Refletiva\";\n  if (t.includes(\"foto\") || t.includes(\"luminescente\")) return \"Fotoluminescente\";\n  if (t.includes(\"uv\") || t.includes(\"impress\")) return \"Impressao UV\";\n  return \"Normal\";\n}\nfunction faixaExpoente(maior, banda){\n  let b = 4;\n  for (const [lim, exp] of FAIXAS) if (maior >= lim) b = exp;\n  if (banda === \"estreita\" && b < -1) b = -1; // acrílicos param na faixa -1\n  return b;\n}\nfunction valorM2(refM2, maior, banda){\n  if (banda === \"fixa\") return refM2; // Lona: m² fixo\n  const b = faixaExpoente(maior, banda);\n  return b >= 0 ? refM2 * Math.pow(1 + TAXA, b) : refM2 * Math.pow(1 - TAXA, -b);\n}\n\n// opts.exigirEspessuraPvc: true no documento de orçamento (a espessura precisa constar)\nfunction calcularPrecoPlaca({ material, tipo, largura, altura, quantidade = 1, placaEndereco = false }, opts){\n  opts = opts || {};\n  const mat = acharMaterial(material);\n  if (!mat) return { ok:false, erro:`material não reconhecido (\"${material}\"). Use PVC, ACM, Aço, Acrílico (2/3/4/5/10 mm) ou Lona.` };\n  const cfg   = MATERIAIS[mat];\n  const tp    = acharTipo(tipo);\n  const refM2 = cfg.tipos[tp];\n\n  // PVC: se a espessura veio no texto, ela entra no nome; no documento é obrigatória\n  let nomeMat = cfg.nome, descMat = cfg.desc;\n  if (mat === \"PVC\") {\n    const espPvc = (norm(material).match(/(\\d+)\\s*mm/) || [])[1];\n    if (espPvc) { nomeMat = `PVC ${espPvc}mm`; descMat = `chapa de PVC ${espPvc}mm`; }\n    else if (opts.exigirEspessuraPvc) return { ok:false, erro:'informe a espessura do PVC no material (ex.: \"PVC 2mm\").' };\n  }\n\n  const L = numCm(largura), A = numCm(altura);\n  if (!(L > 0) || !(A > 0)) return { ok:false, erro:\"faltam as medidas. Informe largura e altura em centímetros.\" };\n\n  const qtd    = Math.max(1, Math.round(Number(quantidade) || 1));\n  const maior  = Math.max(L, A), menor = Math.min(L, A);\n  const m2     = valorM2(refM2, maior, cfg.banda);\n  const areaM2 = (L / 100) * (A / 100);\n  const calc   = Math.round(areaM2 * m2);\n  const minimo = placaEndereco ? cfg.minPlacaEnd : cfg.min;\n  const unit   = Math.max(calc, minimo);\n  const total  = unit * qtd;\n  const cabe   = menor <= Math.min(cfg.largMax, cfg.altMax) && maior <= Math.max(cfg.largMax, cfg.altMax);\n\n  return {\n    ok:true, material:nomeMat, materialDesc:descMat, tipo:TIPO_NOME[tp],\n    largura_cm:L, altura_cm:A, quantidade:qtd,\n    faixa: cfg.banda === \"fixa\" ? 0 : faixaExpoente(maior, cfg.banda),\n    preco_m2_aplicado:+m2.toFixed(2),\n    areaM2, unitario:unit, total,\n    valor_unitario:brl(unit), valor_total:brl(total),\n    dentro_do_limite:cabe,\n  };\n}\n\n// ─────────────────────────── CÁLCULO DE ITENS DE CATÁLOGO ───────────────────────────\nfunction faixaQuantidade(qtd){\n  for (let i = 0; i < FAIXAS_QTD.length; i++) {\n    if (qtd >= FAIXAS_QTD[i].min && qtd <= FAIXAS_QTD[i].max) return { idx:i, rotulo:FAIXAS_QTD[i].rotulo };\n  }\n  return null; // acima de 100\n}\n\n// Resolve o texto do cliente/agente para um item do catálogo.\n// Retorna { slug } | { ambiguo:[slugs] } | { corte:true } | { usarPlaca:true } | null\n// A ORDEM das regras importa (validada por testes): sinais explícitos de placa de\n// trânsito primeiro; depois famílias de itens; depois materiais de placa personalizada\n// (redirect); por último heurísticas de forma (redonda/triangular) e \"aço\" genérico.\nfunction resolverItem(texto){\n  const t = norm(texto).replace(/[_\\-]/g, \" \");\n\n  // slug exato (com _ ou espaço)\n  const slugTry = norm(texto).replace(/\\s+/g, \"_\").replace(/-/g, \"_\");\n  if (CATALOGO[slugTry]) return { slug: slugTry };\n\n  const has = (...ws) => ws.some(w => t.includes(w));\n\n  // corte especial: não cotável. \"\\bcorte\\b\" não captura \"recorte\"; e \"adesivo/vinil\n  // de corte\" é o adesivo de recorte do catálogo, não corte especial.\n  if (!has(\"adesivo\", \"vinil\") && /(\\bcorte\\b|\\blaser\\b|\\brouter\\b|\\bcnc\\b)/.test(t)) return { corte:true };\n\n  // placas de trânsito CONTRAN — sinais EXPLÍCITOS (antes de tudo, para \"placa de\n  // pare com suporte\" não virar suporte)\n  if (/\\bpare\\b/.test(t) || /\\br\\s*[- ]?1\\b/.test(t)) return { slug:\"placa_transito_r1\" };\n  if (/\\br\\s*[- ]?2\\b/.test(t)) return { slug:\"placa_transito_r2\" };\n  if (/\\br\\s*[- ]?([3-9]|[1-3][0-9]|40)\\b/.test(t)) return { slug:\"placa_transito_r3_a_r40\" };\n  if (has(\"50x50\", \"50 x 50\") && has(\"aco\", \"aço\")) return { slug:\"placa_aco_50x50_refletiva\" };\n\n  // famílias de itens do catálogo\n  if (has(\"abracadeira\", \"abraçadeira\")) {\n    if (t.includes(\"40\")) return { slug:\"abracadeira_40cm\" };\n    if (t.includes(\"50\")) return { slug:\"abracadeira_50cm\" };\n    return { ambiguo:[\"abracadeira_40cm\", \"abracadeira_50cm\"] };\n  }\n  if (has(\"bate roda\", \"bate-roda\", \"baterroda\", \"baterodas\", \"bate rodas\")) return { slug:\"bate_rodas\" };\n  if (has(\"balizador\")) return { slug:\"cone_balizador_118cm\" };\n  if (has(\"cone\")) {\n    if (has(\"118\")) return { slug:\"cone_balizador_118cm\" };\n    if (has(\"flexivel\", \"flexível\", \"nbr\")) return { slug:\"cone_flexivel_75cm\" };\n    if (has(\"rigido\", \"rígido\")) return { slug:\"cone_rigido_75cm\" };\n    return { ambiguo:[\"cone_flexivel_75cm\", \"cone_rigido_75cm\", \"cone_balizador_118cm\"] };\n  }\n  if (has(\"corrente\")) {\n    if (has(\"grande\")) return { slug:\"corrente_pedestal_grande\" };\n    if (has(\"pequen\")) return { slug:\"corrente_pedestal_pequena\" };\n    return { ambiguo:[\"corrente_pedestal_grande\", \"corrente_pedestal_pequena\"] };\n  }\n  if (has(\"pedestal\")) return { slug:\"pedestal_zebrado\" };\n  if (has(\"tachao\", \"tachoes\")) {\n    if (/sem\\s+instal/.test(t)) return { slug:\"tachao_sem_instalacao\" };\n    if (/com\\s+instal|instalad/.test(t)) return { slug:\"tachao_com_instalacao\" };\n    return { ambiguo:[\"tachao_com_instalacao\", \"tachao_sem_instalacao\"] };\n  }\n  if (/\\btach(a|as|inha|inhas)\\b/.test(t)) {\n    if (/sem\\s+instal/.test(t)) return { slug:\"tachinha_sem_instalacao\" };\n    if (/com\\s+instal|instalad/.test(t)) return { slug:\"tachinha_com_instalacao\" };\n    return { ambiguo:[\"tachinha_com_instalacao\", \"tachinha_sem_instalacao\"] };\n  }\n  if (has(\"cavalete\")) return { slug:\"cavalete_dupla_face\" };\n  if (has(\"fita\")) {\n    if (has(\"zebrad\")) return { slug:\"fita_zebrada\" };\n    if (has(\"amarel\", \"vermelh\")) return { slug:\"fita_amarela_vermelha\" };\n    return { ambiguo:[\"fita_zebrada\", \"fita_amarela_vermelha\"] };\n  }\n  if (has(\"adesivo\", \"vinil\")) {\n    if (has(\"recort\") || /\\bcorte\\b/.test(t)) return { slug:\"adesivo_recorte\" };\n    if (has(\"impress\", \"digital\")) return { slug:\"adesivo_impresso\" };\n    return { ambiguo:[\"adesivo_recorte\", \"adesivo_impresso\"] };\n  }\n\n  // material de placa personalizada → redireciona ANTES de suporte/poste e das formas\n  // (\"placa de pvc para poste\" e \"placa redonda de acrílico\" são placas personalizadas)\n  if (/(\\bpvc\\b|\\bacm\\b|acril|\\blona\\b|fotolumin)/.test(t)) return { usarPlaca:true };\n\n  if (has(\"suporte\", \"poste\", \"mourao\", \"mourão\")) {\n    if (has(\"madeira\")) return { slug:\"suporte_madeira_3m\" };\n    if (has(\"aco\", \"aço\", \"tubo\", \"metal\", \"ferro\", \"galvaniz\")) return { slug:\"suporte_tubo_aco_3m\" };\n    return { ambiguo:[\"suporte_madeira_3m\", \"suporte_tubo_aco_3m\"] };\n  }\n\n  // heurísticas de forma, só sem material definido (placa CONTRAN por descrição)\n  if (has(\"octogonal\")) return { slug:\"placa_transito_r1\" };\n  if (has(\"preferencia\", \"preferência\", \"triangular\")) return { slug:\"placa_transito_r2\" };\n  if (has(\"redonda\", \"proibido estacionar\", \"regulament\")) return { slug:\"placa_transito_r3_a_r40\" };\n\n  // \"aço\" genérico (sem forma CONTRAN) → placa personalizada\n  if (/\\baco\\b/.test(t)) return { usarPlaca:true };\n\n  return null;\n}\n\nfunction calcularPrecoItem({ produto, quantidade = 1, largura, altura }){\n  const res = resolverItem(produto);\n\n  if (res && res.corte) return {\n    ok:false, transferir:true,\n    erro:\"corte especial (laser/router) não é cotado pelo atendimento. Diga ao cliente que um especialista vai preparar esse orçamento e chame a ferramenta 'transferir' (motivo: corte especial).\",\n  };\n  if (res && res.usarPlaca) return {\n    ok:false, usar_placa:true,\n    erro:\"isso é placa personalizada sob medida — use a ferramenta 'calcular_preco_placa' (material, tipo, largura, altura, quantidade), não esta.\",\n  };\n  if (!res) return {\n    ok:false, nao_encontrado:true, transferir:true,\n    erro:`produto fora da tabela (\"${produto}\"). Diga ao cliente, com naturalidade, que esse item quem orça é um especialista da equipe e chame a ferramenta 'transferir' (motivo: produto fora da tabela). NUNCA diga que não trabalhamos com o item.`,\n  };\n  if (res.ambiguo) return {\n    ok:false, ambiguo:true,\n    opcoes: res.ambiguo.map(s => ({ produto:s, nome:CATALOGO[s].nome })),\n    erro:\"produto ambíguo. Pergunte ao cliente qual destas opções ele deseja: \" + res.ambiguo.map(s => CATALOGO[s].nome).join(\" | \"),\n  };\n\n  const item = CATALOGO[res.slug];\n  const qtd  = Math.round(Number(quantidade) || 1);\n  if (!(qtd >= 1)) return { ok:false, erro:\"informe a quantidade (número inteiro a partir de 1).\" };\n\n  const fx = faixaQuantidade(qtd);\n  if (!fx) return {\n    ok:false, transferir:true,\n    erro:`quantidade de ${qtd} unidades passa do limite da tabela (100). Diga ao cliente que volumes assim têm condição especial e chame a ferramenta 'transferir' (motivo: quantidade acima de 100).`,\n  };\n\n  const precoFaixa = item.precos[fx.idx];\n  let unit, extras = {};\n\n  if (item.porM2) {\n    const L = numCm(largura), A = numCm(altura);\n    if (!(L > 0) || !(A > 0)) return { ok:false, erro:`para ${item.nome.toLowerCase()} preciso das medidas. Informe largura e altura em centímetros.` };\n    const areaM2 = (L / 100) * (A / 100);\n    unit = Math.max(round2(areaM2 * precoFaixa), MINIMO_ADESIVO);\n    extras = { largura_cm:L, altura_cm:A, area_m2:+areaM2.toFixed(4), preco_m2:precoFaixa };\n  } else {\n    unit = precoFaixa;\n  }\n\n  const total = round2(unit * qtd);\n  return {\n    ok:true, produto:res.slug, nome:item.nome, quantidade:qtd, faixa:fx.rotulo,\n    unitario:unit, total, valor_unitario:brl(unit), valor_total:brl(total), ...extras,\n  };\n}\n\n// Linhas de características do item para o documento de orçamento\nfunction specsItem(slug, calc){\n  const item = CATALOGO[slug];\n  const linhas = item.specs.slice();\n  if (item.porM2 && calc && calc.largura_cm) {\n    linhas.push(`Dimensões: ${String(calc.altura_cm).replace(\".\", \",\")} x ${String(calc.largura_cm).replace(\".\", \",\")} cm (A x L)`);\n    if (calc.area_m2) linhas.push(`Área: ${String(+calc.area_m2.toFixed(3)).replace(\".\", \",\")} m² por peça`);\n  }\n  return linhas;\n}\n\n// ============================ ENTRADA/SAÍDA DA FERRAMENTA ============================\n// `query` chega como objeto (schema ligado). Trata também string/JSON por segurança.\nlet q = query;\nif (typeof q === \"string\") { try { q = JSON.parse(q); } catch (e) { q = { material: q }; } }\n\nconst r = calcularPrecoPlaca({\n  material: q.material,\n  tipo: q.tipo,\n  largura: q.largura,\n  altura: q.altura,\n  quantidade: q.quantidade,\n  placaEndereco: !!q.placa_endereco,\n});\n\nif (!r.ok) return JSON.stringify({ ok:false, erro:r.erro });\n\nconst avisos = [];\nif (!r.dentro_do_limite) avisos.push(\"Excede a chapa padrão do material; encaminhar para atendente humano com a ferramenta 'transferir'.\");\nif (r.quantidade > 20) avisos.push(\"Quantidade acima de 20 placas; encaminhar para atendente humano com a ferramenta 'transferir'.\");\n\nreturn JSON.stringify({\n  ok: true,\n  material: r.material,\n  tipo: r.tipo,\n  largura_cm: r.largura_cm,\n  altura_cm: r.altura_cm,\n  quantidade: r.quantidade,\n  valor_unitario: r.valor_unitario,\n  valor_total: r.valor_total,\n  unitario: r.unitario,\n  total: r.total,\n  dentro_do_limite: r.dentro_do_limite,\n  excede_chapa: !r.dentro_do_limite,\n  acima_do_limite_qtd: r.quantidade > 20,\n  observacao: avisos.join(\" \"),\n});\n",
+        "specifyInputSchema": true,
+        "jsonSchemaExample": "{\n  \"material\": \"ACM\",\n  \"tipo\": \"Refletiva\",\n  \"largura\": 50,\n  \"altura\": 80,\n  \"quantidade\": 1,\n  \"placa_endereco\": false\n}\n"
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.3,
+      "position": [
+        2128,
+        3120
+      ],
+      "id": "34d60998-da8f-444a-b087-f0af123490d1",
+      "name": "calcular_preco_placa"
+    },
+    {
+      "parameters": {
+        "description": "Gera o documento oficial de orçamento da Sinaliza Pro em PDF, salva no Google Drive e devolve o LINK compartilhável para enviar ao cliente. Use SOMENTE depois que o cliente confirmar os itens e aceitar receber o orçamento em documento. Antes de chamar, tenha o nome do cliente e peça o CPF/CNPJ (se o cliente preferir não informar, siga sem). Envie TODOS os itens do pedido de uma única vez no campo 'itens' — placas personalizadas E itens de catálogo juntos; nunca chame esta ferramenta uma vez por item. Para PVC, o material deve SEMPRE incluir a espessura (ex.: 'PVC 2mm'). Itens de catálogo vão com o campo 'produto' (slug retornado pela calcular_preco_item). Os preços são recalculados internamente com a mesma tabela oficial; não envie valores. Retorna JSON: { ok:true, link, numero_proposta, valor_total, prazo_producao } — envie o link ao cliente e, na sequência, use a ferramenta 'transferir' (fechamento) — ou { ok:false, erro } — peça o dado que faltou ou encaminhe a um atendente humano, conforme o erro.",
+        "workflowId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list",
+          "cachedResultName": "Tool: Gerar Orçamento PDF"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "cliente_nome": "={{ $fromAI('cliente_nome', 'Nome do cliente ou da empresa para constar na proposta. Se ainda não souber, pergunte ao cliente antes de chamar a ferramenta.', 'string') }}",
+            "cliente_documento": "={{ $fromAI('cliente_documento', 'CPF ou CNPJ do cliente para constar na proposta. Peça na conversa junto com o nome; se o cliente preferir não informar, envie string vazia.', 'string') }}",
+            "cliente_telefone": "={{ $fromAI('cliente_telefone', 'Telefone/WhatsApp do cliente para constar na proposta. Envie string vazia se não tiver.', 'string') }}",
+            "itens": "={{ $fromAI('itens', \"Lista JSON com TODOS os itens confirmados do orçamento, de uma vez só (placas personalizadas E itens de catálogo juntos). Cada item tem UMA das duas formas. PLACA personalizada: {\\\"descricao\\\": \\\"texto curto do que é a placa (ex.: Placa de identificação de obra)\\\", \\\"material\\\": \\\"PVC <espessura>mm (SEMPRE com a espessura, ex.: PVC 2mm) | ACM | Aço | Acrílico 2mm | Acrílico 3mm | Acrílico 4mm | Acrílico 5mm | Acrílico 10mm | Lona\\\", \\\"tipo\\\": \\\"Normal | Refletiva | Fotoluminescente | Impressão UV\\\", \\\"largura\\\": número em cm, \\\"altura\\\": número em cm, \\\"quantidade\\\": número inteiro, \\\"placa_endereco\\\": true somente se for placa de endereço}. ITEM de catálogo: {\\\"produto\\\": \\\"slug retornado pela calcular_preco_item (ex.: suporte_madeira_3m, cone_rigido_75cm, placa_transito_r1, adesivo_impresso)\\\", \\\"quantidade\\\": número inteiro, \\\"descricao\\\": \\\"opcional\\\", \\\"largura\\\" e \\\"altura\\\": em cm, SOMENTE para adesivos}. Não envie preços. Exemplo misto: [{\\\"descricao\\\":\\\"Placa de obra\\\",\\\"material\\\":\\\"Aço\\\",\\\"tipo\\\":\\\"Normal\\\",\\\"largura\\\":200,\\\"altura\\\":120,\\\"quantidade\\\":1},{\\\"produto\\\":\\\"suporte_madeira_3m\\\",\\\"quantidade\\\":2},{\\\"produto\\\":\\\"adesivo_impresso\\\",\\\"quantidade\\\":10,\\\"largura\\\":100,\\\"altura\\\":50}]\", 'json') }}",
+            "observacoes": "={{ $fromAI('observacoes', 'Observação extra para constar no PDF, como detalhes de arte ou entrega (opcional; envie string vazia se não houver).', 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "cliente_nome",
+              "displayName": "cliente_nome",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "cliente_documento",
+              "displayName": "cliente_documento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "cliente_telefone",
+              "displayName": "cliente_telefone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "itens",
+              "displayName": "itens",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "array"
+            },
+            {
+              "id": "observacoes",
+              "displayName": "observacoes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "id": "3274aae4-99b7-4a92-8cba-932d7bdbc015",
+      "name": "gerar_orcamento_pdf",
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        1856,
+        3120
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "8d3a577e-13de-4dd3-8540-77d0717571d2",
+      "name": "Loop Over Items",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        2288,
+        2512
+      ]
+    },
+    {
+      "parameters": {
+        "action": "generate"
+      },
+      "id": "7b9ffe51-6447-4f0f-a91e-e7e5d27c37a2",
+      "name": "Crypto",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [
+        -2064,
+        3184
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "options": {}
+      },
+      "id": "be404921-b12b-4573-a266-c0efd0e94e40",
+      "name": "Extract from File",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        -32,
+        2784
+      ]
+    },
+    {
+      "parameters": {
+        "dataToSave": {
+          "values": [
+            {
+              "key": "telefone",
+              "value": "={{ $json.telefone_limpo }}"
+            },
+            {
+              "key": "pushName",
+              "value": "={{ $json.pushname }}"
+            },
+            {
+              "key": "mensagem",
+              "value": "={{ $json.mensagem }}"
+            },
+            {
+              "key": "eventType",
+              "value": "={{ $json.EventType }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executionData",
+      "typeVersion": 1.1,
+      "position": [
+        -3232,
+        2576
+      ],
+      "id": "27bd6b79-ac3d-4ff1-82f8-f6e0cc4f3ac2",
+      "name": "tag"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "204630a5-9333-422e-9b2c-83486a227b87",
+              "leftValue": "={{ $('global_var').item.json.fromMe }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -2560,
+        2592
+      ],
+      "id": "1dc373e4-e3e8-4ed0-8db3-fc5dc7a8d4f3",
+      "name": "fromMe"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "chats_new",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteJid",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "HUMANO"
+            },
+            {
+              "fieldId": "pausado_em",
+              "fieldValue": "={{ $now }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -912,
+        2112
+      ],
+      "id": "6e1144a9-4eef-46fa-99be-b1bae2dd41c7",
+      "name": "statusHumano",
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "followup",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteID",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "encerrado",
+              "fieldValue": "TRUE"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -752,
+        2112
+      ],
+      "id": "b3c6d36a-fcb4-40a7-af09-aad1d3bce5a2",
+      "name": "encerradoTrue",
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "followup",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteID",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "encerrado",
+              "fieldValue": "FALSE"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1232,
+        2112
+      ],
+      "id": "9c555db4-7ea7-4f23-a377-afa466780273",
+      "name": "encerradoFalse",
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "chats_new",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteJid",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "I.A"
+            },
+            {
+              "fieldId": "transferido",
+              "fieldValue": "FALSE"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1072,
+        2112
+      ],
+      "id": "4ef29d18-20d2-4b68-9f95-75ced7d4dbb3",
+      "name": "statusI.A",
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "chats_new",
+        "limit": 1,
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteJid",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').item.json.responsavel }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -2400,
+        2608
+      ],
+      "id": "a980a6e9-2df6-46d8-a44b-e06dcbecfe36",
+      "name": "findClient",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "4a6d9aac-8565-4c58-abe3-8741393a5535",
+              "leftValue": "={{ $json.remoteJid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "d5d31c1b-af8e-46e0-ad4f-02024d8f942d",
+              "leftValue": "={{ $('findClient').item.json.responsavel }}",
+              "rightValue": "={{ $('global_var').item.json.responsavel }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            },
+            {
+              "id": "04485a56-3c84-47c2-ab75-02dcbe001ea0",
+              "leftValue": "={{ $json.cliente }}",
+              "rightValue": "={{ $('global_var').item.json.cliente }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -2240,
+        2608
+      ],
+      "id": "b60d950f-bb0c-4d26-899f-1209036d1eb2",
+      "name": "isClient"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "edaacaa2-f8b1-4ed7-9ef6-c17edcb98480",
+              "leftValue": "={{ $('findClient').item.json.status }}",
+              "rightValue": "I.A",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -2080,
+        2592
+      ],
+      "id": "60c28294-7052-4ee6-95c2-0e3201f91588",
+      "name": "isStatusI.A"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "followup",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteID",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "ultimaAtividade",
+              "fieldValue": "={{ $now }}"
+            },
+            {
+              "fieldId": "ultimaMensagem",
+              "fieldValue": "={{ $('global_var').first().json.mensagem }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1920,
+        2576
+      ],
+      "id": "d111e641-b67b-4f63-a3d4-a53aeec42be9",
+      "name": "updateLastInteraction",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableId": "chats_new",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "remoteJid",
+              "fieldValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "fieldId": "chatID",
+              "fieldValue": "={{ $json.data }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "I.A"
+            },
+            {
+              "fieldId": "sourceId",
+              "fieldValue": "={{ $node[\"global_var\"].json.sourceId }}"
+            },
+            {
+              "fieldId": "ctwaClid",
+              "fieldValue": "={{ $node[\"global_var\"].json.ctwaClid }}"
+            },
+            {
+              "fieldId": "sourceUrl",
+              "fieldValue": "={{ $node[\"global_var\"].json.sourceUrl }}"
+            },
+            {
+              "fieldId": "transferido",
+              "fieldValue": "FALSE"
+            },
+            {
+              "fieldId": "cliente",
+              "fieldValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "fieldId": "responsavel",
+              "fieldValue": "={{ $('global_var').first().json.responsavel }}"
+            },
+            {
+              "fieldId": "name",
+              "fieldValue": "={{ $('global_var').first().json.pushname }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1904,
+        3184
+      ],
+      "id": "671ec908-a674-4553-ab07-ef94261d4c2c",
+      "name": "newChat",
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "tableId": "followup",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "ultimaAtividade",
+              "fieldValue": "={{ $now }}"
+            },
+            {
+              "fieldId": "ultimaMensagem",
+              "fieldValue": "={{ $('global_var').item.json.mensagem }}"
+            },
+            {
+              "fieldId": "remoteID",
+              "fieldValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "fieldId": "responsavel",
+              "fieldValue": "={{ $('global_var').first().json.responsavel }}"
+            },
+            {
+              "fieldId": "cliente",
+              "fieldValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "fieldId": "name",
+              "fieldValue": "={{ $('global_var').first().json.pushname }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1584,
+        3184
+      ],
+      "id": "9bca4d30-403b-4457-b9cf-2aecf351524e",
+      "name": "newFollowup",
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "amount": 1
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -1744,
+        3184
+      ],
+      "id": "bc569619-eace-422f-bdc9-34670e95ae2e",
+      "name": "Wait1s"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "52aaf749-fe4f-44e4-880e-15b2bfc027f1",
+                    "leftValue": "={{ ['extendedtextmessage', 'conversation'].includes($('global_var').item.json.messageType.toLowerCase()) }}",
+                    "rightValue": "extendedTextMessage",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Text"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "a6379493-56bf-49c2-a406-0a68d4220674",
+                    "leftValue": "={{ $('global_var').item.json.messageType }}",
+                    "rightValue": "AudioMessage",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Audio"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "ead847ea-debe-4c53-bc85-e658f6f79321",
+                    "leftValue": "={{ $('global_var').item.json.messageType }}",
+                    "rightValue": "DocumentMessage",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Doc"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "c0e434dd-1268-421d-b81b-3a5e90ed9550",
+                    "leftValue": "={{ $('global_var').item.json.messageType }}",
+                    "rightValue": "ImageMessage",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "image"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "21e1703a-076e-41df-a88b-2a53ba98bcfc",
+      "name": "routerMessageType",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -720,
+        2736
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('global_var').item.json[\"http-uazapi\"] }}/message/download",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "token",
+              "value": "={{ $('global_var').item.json[\"apikey-uazapi\"] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "id",
+              "value": "={{ $('global_var').item.json.messageid }}"
+            },
+            {
+              "name": "return_base64",
+              "value": "false"
+            },
+            {
+              "name": "generate_mp3",
+              "value": "false"
+            },
+            {
+              "name": "return_link",
+              "value": "false"
+            },
+            {
+              "name": "transcribe",
+              "value": "true"
+            },
+            {
+              "name": "openai_apikey",
+              "value": "={{ $env.OPENAI_APIKEY }}"
+            },
+            {
+              "name": "download_quoted",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -512,
+        2752
+      ],
+      "id": "905c9a37-b24a-40dc-a7ed-69dc3a87f7ac",
+      "name": "audioFile/Transcribe",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('global_var').item.json[\"http-uazapi\"] }}/message/download",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "token",
+              "value": "={{ $('global_var').item.json[\"apikey-uazapi\"] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "id",
+              "value": "={{ $('global_var').item.json.messageid }}"
+            },
+            {
+              "name": "return_base64",
+              "value": "true"
+            },
+            {
+              "name": "generate_mp3",
+              "value": "false"
+            },
+            {
+              "name": "return_link",
+              "value": "false"
+            },
+            {
+              "name": "transcribe",
+              "value": "false"
+            },
+            {
+              "name": "openai_apikey",
+              "value": "SUA_CHAVE_OPENAI"
+            },
+            {
+              "name": "download_quoted",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        128,
+        2816
+      ],
+      "id": "dc2f754b-e689-48b3-ba0a-a70fec736eb6",
+      "name": "imageFile/Base64"
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "base64Data",
+        "options": {
+          "fileName": "file.png",
+          "mimeType": "image/png"
+        }
+      },
+      "id": "ce87f60f-fc31-4835-8190-8ba371b2122b",
+      "name": "imgFile",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        288,
+        2816
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "base64Data",
+        "options": {}
+      },
+      "id": "da381c7e-ce45-4a04-ba62-83132068ddc6",
+      "name": "docFile",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        -192,
+        2784
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('global_var').item.json[\"http-uazapi\"] }}/message/download",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "token",
+              "value": "={{ $('global_var').item.json[\"apikey-uazapi\"] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "id",
+              "value": "={{ $('global_var').item.json.messageid }}"
+            },
+            {
+              "name": "return_base64",
+              "value": "true"
+            },
+            {
+              "name": "generate_mp3",
+              "value": "false"
+            },
+            {
+              "name": "return_link",
+              "value": "false"
+            },
+            {
+              "name": "transcribe",
+              "value": "false"
+            },
+            {
+              "name": "openai_apikey",
+              "value": "SUA_CHAVE_OPENAI"
+            },
+            {
+              "name": "download_quoted",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -352,
+        2784
+      ],
+      "id": "f14d7f79-5253-4c2e-8103-610bc3c5023d",
+      "name": "file/Base64"
+    },
+    {
+      "parameters": {
+        "resource": "image",
+        "operation": "analyze",
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "text": "Descreva todo o conteudo da imagem. Responda sem acento, sem hifens",
+        "inputType": "base64",
+        "options": {}
+      },
+      "id": "531daedd-ece8-431a-ac3b-e340bed3c441",
+      "name": "transcripImage",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.6,
+      "position": [
+        448,
+        2816
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const camposMensagem = ['transcription', 'text', 'message', 'content', 'body', 'caption', 'ultimaMensagem', 'mensagem'];\n\nreturn $input.all().map(item => {\n  const dados = item.json;\n  let mensagem = null;\n  \n  for (const campo of camposMensagem) {\n    if (dados[campo] && typeof dados[campo] === 'string' && dados[campo].trim().length > 0) {\n      mensagem = dados[campo];\n      break;\n    }\n  }\n  \n  return { mensagem };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        592,
+        2528
+      ],
+      "id": "b5cb0e16-1692-4e83-8b02-e5bc617af9aa",
+      "name": "getMessage"
+    },
+    {
+      "parameters": {
+        "amount": 14
+      },
+      "id": "56999175-3859-486d-8368-bab9885168a8",
+      "name": "Wait8s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        912,
+        2528
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputText = $('AI Agent1').first().json.output;\n\nconst normalizedText = inputText.replace(/\\\\n/g, '\\n');\n\nconst messages = normalizedText\n  .split(/\\s*\\n\\n+\\s*/)\n  .filter(msg => msg.trim() !== '');\n\nreturn messages.map(message => ({\n  json: {\n    text: message.trim()\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2080,
+        2512
+      ],
+      "id": "c07b6fb0-d3df-4692-8db5-d007b739afe1",
+      "name": "split\\n\\n"
+    },
+    {
+      "parameters": {
+        "operation": "push",
+        "list": "={{ $('global_var').first().json.telefone }}",
+        "messageData": "={{ $json.mensagem }}",
+        "tail": true
+      },
+      "id": "2c290d45-45bb-4807-8622-e673ad1a89e6",
+      "name": "pushRedis",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        752,
+        2528
+      ],
+      "credentials": {
+        "redis": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "key": "={{ $('global_var').first().json.telefone }}",
+        "options": {}
+      },
+      "id": "b56d6141-4efa-4d93-a00e-05f3e4da989d",
+      "name": "getRedis",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1072,
+        2528
+      ],
+      "credentials": {
+        "redis": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "21fd20d7-f940-4a66-91d5-5ea4c031bb50",
+              "leftValue": "={{ $json.propertyName.last().replace(/\\\\n/g, \" \").trim() }}",
+              "rightValue": "={{ $('pushRedis').item.json.mensagem.replace(/\\\\n/g, \" \").trim() }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "59b8f5d3-b289-492c-90f0-be2e5e63ae82",
+      "name": "messageCheck",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1232,
+        2528
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "37f63b88-4a52-4421-aa95-db9114e521bc",
+              "name": "listaMensagens",
+              "value": "={{ $json.propertyName.join(', ') }}",
+              "type": "string"
+            },
+            {
+              "id": "267bdcd5-e1ea-49f0-abd7-97451c843239",
+              "name": "key",
+              "value": "={{ $('global_var').first().json.telefone }}",
+              "type": "string"
+            },
+            {
+              "id": "2c95ea56-55ae-418b-bd6f-d940162b657e",
+              "name": "statusPedido",
+              "value": "={{ $('findClient').all()[0]?.json?.status_pedido ?? 'sem' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "eb0be2f9-db76-4f4e-88d9-c3f572b3f8e6",
+      "name": "setMessage",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1392,
+        2512
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "key": "={{ $json.key }}"
+      },
+      "id": "e44a53c5-cbb6-4eae-8794-e5e0fc0e9bc7",
+      "name": "deleteRedis",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1552,
+        2512
+      ],
+      "credentials": {
+        "redis": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.text.match(/https:\\/\\/.*(\\.(jpeg|jpg|png|webp)|&ext=\\.(jpeg|jpg|png|webp))/gi) != null }}",
+                    "rightValue": "https",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    },
+                    "id": "d35f0f03-360e-47e9-a72b-9749a4323ded"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "imagem"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "7e5907c4-8b5b-4803-b269-3c1453efee15",
+                    "leftValue": "={{ $json.text.match(/https:\\/\\/.*(\\.(pdf)|&ext=\\.(pdf))/gi) != null }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "pdf"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "220dfbb2-989f-466f-978c-8a5d76410ddb",
+                    "leftValue": "={{ $json.text.match(/https:\\/\\/.*(\\.(mp4|mov|mkv|wav)|&ext=\\.(mp4|mov|mkv|wav))/gi) != null }}",
+                    "rightValue": "video",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "video"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "e142ba2c-0b2d-4d06-9c20-41164898d145",
+                    "leftValue": "={{ $json.text.match(/https:\\/\\/.*(\\.(mp3)|&ext=\\.(mp3))/gi) != null }}",
+                    "rightValue": "audioMessage",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "audio"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "ac4df8ec-8082-4ef7-983b-57edce0515b8",
+      "name": "routerSendType",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2448,
+        2480
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('global_var').first().json['http-uazapi'] }}/send/text",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "token",
+              "value": "={{ $('global_var').first().json['apikey-uazapi'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "number",
+              "value": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $('routerSendType').item.json.text }}"
+            },
+            {
+              "name": "delay",
+              "value": "={{ $json.tempoMs }}"
+            },
+            {
+              "name": "linkPreview",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3360,
+        2672
+      ],
+      "id": "069d88d8-7f8b-47c8-a88e-77186e81e875",
+      "name": "text",
+      "disabled": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('global_var').item.json['http-uazapi'] }}/send/media",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "token",
+              "value": "={{ $('global_var').item.json['apikey-uazapi'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "number",
+              "value": "={{ $('global_var').item.json.telefone }}"
+            },
+            {
+              "name": "type",
+              "value": "={{ $json.type }}"
+            },
+            {
+              "name": "file",
+              "value": "={{ $json.text }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3344,
+        2368
+      ],
+      "id": "6b2fa3fa-6a33-4108-a998-c3c8aa085cde",
+      "name": "fileSender",
+      "disabled": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nconst imageRegex = /https:\\/\\/.*(\\.(jpeg|jpg|png|webp)|&ext=\\.(jpeg|jpg|png|webp))/gi;\nconst pdfRegex = /https:\\/\\/.*(\\.(pdf)|&ext=\\.(pdf))/gi;\nconst videoRegex = /https:\\/\\/.*(\\.(mp4|mov|mkv|wav)|&ext=\\.(mp4|mov|mkv|wav))/gi;\n\nconst urlRegex = /https?:\\/\\/[^\\s\\)]+/gi;\n\nreturn items.map(item => {\n  const text = (item.json.text || '').trim();\n  \n  const urlMatch = text.match(urlRegex);\n  const url = urlMatch ? urlMatch[0] : text;\n  \n  let type = null;\n  \n  if (url.match(imageRegex)) {\n    type = 'image';\n  } else if (url.match(videoRegex)) {\n    type = 'video';\n  } else if (url.match(pdfRegex)) {\n    type = 'document';\n  }\n  \n  return {\n    ...item.json,\n    text: url,\n    type\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3184,
+        2368
+      ],
+      "id": "b07b6348-a3bd-4246-b6aa-d94cb64e9ab1",
+      "name": "setType"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        3808,
+        2496
+      ],
+      "id": "119c101a-c0b4-400b-9e1d-f728c5d4822a",
+      "name": "Limit"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\nconst eventType = body.EventType;\nconst chat = body.chat || {};\n\n// Identidade canonica do contato: sempre o JID de telefone real.\n// chat.wa_chatid vem em TODO evento (mensagem e chat_labels) e e estavel por contato.\n// NUNCA usar message.sender / message.sender_lid: podem vir como @lid (ID de privacidade do WhatsApp)\n// e quebram a busca de cliente e a memoria do agente.\nfunction canonicalJid(b) {\n  const c = b.chat || {};\n  const m = b.message || {};\n  const candidatos = [c.wa_chatid, m.sender_pn, m.chatid];\n  for (const v of candidatos) {\n    if (typeof v === 'string' && v.includes('@s.whatsapp.net')) return v;\n  }\n  for (const v of candidatos) {\n    if (typeof v === 'string' && v.trim()) return v;\n  }\n  return null;\n}\n\nfunction soDigitos(jid) {\n  return jid ? jid.replace(/@s\\.whatsapp\\.net|@lid|@g\\.us/g, '') : null;\n}\n\nfunction derivarInstancia(instanceName) {\n  let responsavel = null;\n  let cliente = null;\n  if (instanceName && instanceName.includes('-')) {\n    const partes = instanceName.split('-');\n    responsavel = partes[partes.length - 1].trim();\n    cliente = partes[0].trim();\n  } else if (instanceName) {\n    responsavel = instanceName.trim();\n    cliente = instanceName.trim();\n  }\n  return { responsavel, cliente };\n}\n\nconst telefoneCanonico = canonicalJid(body);\nconst inst = derivarInstancia(body.instanceName);\n\nif (eventType === 'chat_labels') {\n  return {\n    EventType: eventType,\n    wa_label: chat.wa_label || null,\n    telefone: telefoneCanonico,\n    telefone_limpo: soDigitos(telefoneCanonico),\n    pushname: chat.wa_contactName || chat.name || null,\n    'instancia_uazapi': body.instanceName || null,\n    'http-uazapi': body.BaseUrl || null,\n    'apikey-uazapi': body.token || null,\n    cliente: inst.cliente,\n    responsavel: inst.responsavel,\n    'isGroup': chat.wa_isGroup || false,\n    senderlid: chat.wa_chatlid || null\n  };\n}\n\nconst message = body.message;\nconst whatsappNumber = telefoneCanonico;\nconst responsavel = inst.responsavel;\nconst cliente = inst.cliente;\n\nlet mensagemFinal = message.text || null;\n\nif (!mensagemFinal && message.fromMe) {\n  switch (message.messageType) {\n    case 'DocumentMessage':\n      const fileName = message.content?.fileName || message.content?.title;\n      mensagemFinal = fileName ? `[Documento: ${fileName}]` : '[Documento Enviado]';\n      break;\n\n    case 'ImageMessage':\n      const imageCaption = message.content?.caption;\n      mensagemFinal = imageCaption || '[Imagem Enviada]';\n      break;\n\n    case 'VideoMessage':\n      const videoCaption = message.content?.caption;\n      mensagemFinal = videoCaption || '[Vídeo Enviado]';\n      break;\n\n    case 'AudioMessage':\n    case 'PTT':\n      mensagemFinal = '[Áudio Enviado]';\n      break;\n\n    case 'StickerMessage':\n      mensagemFinal = '[Sticker Enviado]';\n      break;\n\n    case 'LocationMessage':\n      const location = message.content;\n      if (location?.name || location?.address) {\n        mensagemFinal = `[Localização: ${location.name || location.address}]`;\n      } else {\n        mensagemFinal = '[Localização Enviada]';\n      }\n      break;\n\n    case 'ContactMessage':\n      const contactName = message.content?.displayName || message.content?.vcard;\n      mensagemFinal = contactName ? `[Contato: ${contactName}]` : '[Contato Enviado]';\n      break;\n\n    case 'NativeFlowMessage':\n      try {\n        const button = message.content?.InteractiveMessage?.NativeFlowMessage?.buttons?.[0];\n        if (button?.name === 'payment_info') {\n          mensagemFinal = '[Solicitação de Pagamento PIX]';\n        } else {\n          mensagemFinal = '[Mensagem Interativa]';\n        }\n      } catch (e) {\n        mensagemFinal = '[Mensagem Interativa]';\n      }\n      break;\n\n    case 'ListMessage':\n    case 'ButtonsMessage':\n      mensagemFinal = '[Mensagem com Botões]';\n      break;\n\n    default:\n      if (message.mediaType) {\n        mensagemFinal = `[Mídia: ${message.mediaType}]`;\n      }\n  }\n}\n\nif (!mensagemFinal && message.messageType === 'NativeFlowMessage') {\n  try {\n    const button = message.content?.InteractiveMessage?.NativeFlowMessage?.buttons?.[0];\n    if (button?.name === 'payment_info') {\n      mensagemFinal = '[Solicitação de Pagamento PIX]';\n    } else {\n      mensagemFinal = '[Mensagem Interativa]';\n    }\n  } catch (e) {\n    mensagemFinal = '[Mensagem Interativa]';\n  }\n}\n\nreturn {\n  telefone: whatsappNumber,\n  telefone_limpo: soDigitos(whatsappNumber),\n  pushname: message.senderName || null,\n  mensagem: mensagemFinal,\n  'instancia_uazapi': body.instanceName || null,\n  'http-uazapi': body.BaseUrl || null,\n  'apikey-uazapi': body.token || null,\n  messageType: message.messageType || null,\n  sourceId: message.content?.contextInfo?.externalAdReply?.sourceID || 'sem trackeamento',\n  ctwaClid: message.content?.contextInfo?.externalAdReply?.ctwaClid || 'sem trackeamento',\n  sourceUrl: message.content?.contextInfo?.externalAdReply?.sourceURL || 'sem trackeamento',\n  sourceApp: message.content?.contextInfo?.externalAdReply?.sourceApp || 'sem trackeamento',\n  conversionSource: message.content?.contextInfo?.conversionSource || 'sem trackeamento',\n  cliente: cliente,\n  responsavel: responsavel,\n  'fromMe': message.fromMe || false,\n  'wasSentByApi': message.wasSentByApi === true,\n  'isGroup': chat.wa_isGroup || false,\n  reaction: message.reaction || null,\n  quoted: message.quoted || null,\n  mimetype: message.content?.mimetype || null,\n  messageid: message.messageid || null,\n  senderlid: message.sender_lid || null,\n  EventType: eventType || null,\n  wa_label: chat.wa_label || null\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3392,
+        2576
+      ],
+      "id": "a9ceef32-2d49-44c1-a468-99441b0aaa42",
+      "name": "global_var"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pega o item de entrada atual\nconst text = $input.item.json.text || '';\n\nconst caracteres = text.length;\n\n// Regra de tempo\nconst msPerChar = 800 / 34;\nlet tempoMs = Math.round(caracteres * msPerChar);\n\nif (caracteres >= 400) {\n  tempoMs = 4000;\n}\n\nreturn {\n  json: {\n    text,\n    caracteres,\n    tempoMs,\n    tempoSegundos: Number((tempoMs / 1000).toFixed(2)),\n  },\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3200,
+        2672
+      ],
+      "id": "96aefdaa-d564-4adb-9956-1a1dac42fb52",
+      "name": "delay"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "40c9682a-69ab-4b1d-9f87-50859d407544",
+              "leftValue": "={{ $json.EventType }}",
+              "rightValue": "chat_labels",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -3040,
+        2576
+      ],
+      "id": "ccd16e3a-e3ab-4b2e-bafc-7512ebfd600c",
+      "name": "EventType"
+    },
+    {
+      "parameters": {
+        "url": "={{ $('global_var').item.json[\"http-uazapi\"] }}/labels",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "token",
+              "value": "={{ $('global_var').item.json[\"apikey-uazapi\"] }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -1968,
+        1760
+      ],
+      "id": "4da41bc8-7b30-47fd-99f4-f2c57b6e83bb",
+      "name": "getLabels"
+    },
+    {
+      "parameters": {
+        "jsCode": "const pausadoItem = $input.all().find(item => item.json.name.toLowerCase() === \"pausado\");\nif (!pausadoItem) {\n  return [{ json: { status: \"ERRO\", mensagem: \"Item 'Pausado' não encontrado\" } }];\n}\nconst pausadoId = pausadoItem.json.id;\n\nconst hook = $('Webhook1').first().json.body.chat;\nconst waLabels = hook.wa_label || [];\n\nconst temLabelPausado = waLabels.includes(pausadoId);\n\nif (temLabelPausado) {\n  return [{ json: { status: \"PAUSADO\" } }];\n} else {\n  return [{ json: { status: \"ATIVO\" } }];\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1808,
+        1760
+      ],
+      "id": "4ad03969-bb87-461b-9c4a-b6d6fa4c579d",
+      "name": "isStopped"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "73ab43f4-d39b-4e27-8388-69b0a24e3193",
+              "leftValue": "={{ $json.remoteID }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -848,
+        1728
+      ],
+      "id": "dd07cd98-5efc-466f-9ab4-3116ce0c2ea2",
+      "name": "remoteID"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "followup",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteID",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "encerrado",
+              "fieldValue": "TRUE"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1008,
+        1728
+      ],
+      "id": "56670717-1bf7-4f9b-8aea-41cc0d60c048",
+      "name": "tag_encerradoTrue",
+      "retryOnFail": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "chats_new",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteJid",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "HUMANO"
+            },
+            {
+              "fieldId": "pausado_em",
+              "fieldValue": "={{ $now }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1168,
+        1728
+      ],
+      "id": "89fd501f-8b64-480e-a30f-9839638c5815",
+      "name": "tag_statusHumano",
+      "retryOnFail": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableId": "chats_new",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "remoteJid",
+              "fieldValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "fieldId": "crmID",
+              "fieldValue": "Lead"
+            },
+            {
+              "fieldId": "senderLid",
+              "fieldValue": "={{ $('global_var').first().json.senderlid }}"
+            },
+            {
+              "fieldId": "cliente",
+              "fieldValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "fieldId": "responsavel",
+              "fieldValue": "={{ $('global_var').first().json.responsavel }}"
+            },
+            {
+              "fieldId": "name",
+              "fieldValue": "={{ $('global_var').first().json.pushname }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "HUMANO"
+            },
+            {
+              "fieldId": "pausado_em",
+              "fieldValue": "={{ $now }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -688,
+        1744
+      ],
+      "id": "c5ffe8cc-e751-4c19-ad6a-8a9e89f8c140",
+      "name": "newChat+Humano",
+      "retryOnFail": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableId": "followup",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "remoteID",
+              "fieldValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "fieldId": "senderLid",
+              "fieldValue": "={{ $('global_var').first().json.senderlid }}"
+            },
+            {
+              "fieldId": "cliente",
+              "fieldValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "fieldId": "responsavel",
+              "fieldValue": "={{ $('global_var').first().json.responsavel }}"
+            },
+            {
+              "fieldId": "name",
+              "fieldValue": "={{ $('global_var').first().json.pushname }}"
+            },
+            {
+              "fieldId": "encerrado",
+              "fieldValue": "TRUE"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -528,
+        1744
+      ],
+      "id": "b0c823c2-bf69-4ce1-b20a-f9ec6bbb3c37",
+      "name": "newFollow+Encerrado",
+      "retryOnFail": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "followup",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteID",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "encerrado",
+              "fieldValue": "FALSE"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1296,
+        1840
+      ],
+      "id": "c84d51b2-0d7b-4748-9050-fb7179aa82e3",
+      "name": "tag_encerradoFalse",
+      "retryOnFail": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "chats_new",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteJid",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "I.A"
+            },
+            {
+              "fieldId": "transferido",
+              "fieldValue": "FALSE"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1456,
+        1840
+      ],
+      "id": "545a4a17-8402-4d8e-a3d2-9503a0a79089",
+      "name": "tag_statusI.A",
+      "retryOnFail": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -592,
+        2160
+      ],
+      "id": "b26a2bfa-0db7-4211-85d1-1bea02c21131",
+      "name": "No Operation, do nothing"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "PAUSADO",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "add873d6-6670-41ae-8c16-d69ee8ac3811"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Stopped"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "b551a548-c266-43a3-9e97-043f41f563cc",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "ERRO",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Error"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.3,
+      "position": [
+        -1648,
+        1744
+      ],
+      "id": "fa7c7f46-40aa-4b64-a145-55aa86d64ebc",
+      "name": "routerStopped"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{$json.listaMensagens.replace(/\\n/g, \"\\\\n\").replace(/['\"]/g, '')}}",
+        "options": {
+          "systemMessage": "=Você é a Camila, atendente da Sinaliza Pro. Entende bem de sinalização visual e viária e atende com jeito humano, cordial e prestativo. Você conversa como uma pessoa de verdade no WhatsApp, não como um robô.\n\nSEU OBJETIVO:\n- entender o que o cliente precisa\n- coletar os dados certos sem burocracia\n- gerar orçamentos corretos (sempre pelas ferramentas)\n- conduzir o cliente até o fechamento, com clareza\n\nFORMATO DAS MENSAGENS (muito importante):\n- NUNCA escreva a mensagem inteira em uma única linha corrida. Sempre quebre em blocos curtos, separados por uma linha vazia.\n- Cada bloco carrega uma ideia só: saudação em um bloco, a informação em outro, a pergunta em outro.\n- Como regra prática, use de 2 a 3 blocos por mensagem. Passar disso deixa a leitura cansativa.\n- Quando houver pergunta ou próximo passo, ele fica sempre no último bloco, sozinho.\n- Não use emojis em nenhuma mensagem.\n\nExemplo de como NÃO escrever (tudo em uma linha só):\n\"Perfeito! Ficou R$ 246,00 cada, totalizando R$ 2.214,00 pelas 9 placas. Quer que eu formalize isso em um documento de orçamento?\"\n\nExemplo de como escrever (com linha vazia entre os blocos):\n\"Perfeito!\n\nFicou R$ 246,00 cada, totalizando R$ 2.214,00 pelas 9 placas.\n\nQuer que eu formalize isso em um documento de orçamento?\"\n\nTOM DE VOZ (muito importante):\n- Fale como gente: cordial, atenciosa, natural e direta. Profissional, mas sem frieza.\n- Evite gírias e abreviações. Nada de \"tá\", \"pra\", \"cê\", \"prontinho\", \"fechou\", \"dando\", \"certinho\". Prefira as formas completas: \"está\", \"para\", \"você\", \"totalizando\", \"corretamente\".\n- Mensagens curtas e leves. Nunca pareça um formulário.\n- NUNCA responda em lista seca de \"Campo: valor\". Prefira frases naturais. Ex.: em vez de \"Material: Aço / Quantidade: 9 / Largura: 55 / Altura: 60\", diga \"9 placas de aço, 55×60 cm\".\n- Varie as palavras; não repita sempre a mesma frase pronta.\n- Use as próprias palavras do cliente.\n- Pergunte só o que falta, uma coisa de cada vez. Se o cliente já mandou tudo junto, não repita perguntas.\n- NUNCA despeje regras internas nem termos técnicos do sistema (faixas, mínimos, \"refletivo de fábrica\", limite de chapa, slug, etc.). Se precisar esclarecer algo, faça de um jeito simples e curto.\n- Se o cliente parecer com pressa ou em dúvida, seja ainda mais objetiva e gentil.\n- Se apresente como Camila. NÃO diga que é um atendimento automático e NÃO ofereça falar com um humano por conta própria.\n\nO QUE VOCÊS VENDEM:\n1) PLACAS PERSONALIZADAS sob medida — em PVC, ACM, Aço, Acrílico (2, 3, 4, 5 ou 10 mm) e Lona; acabamento normal, refletivo, fotoluminescente ou impressão UV. Cotadas pela ferramenta 'calcular_preco_placa'.\n2) ITENS DE SINALIZAÇÃO do catálogo — cotados pela ferramenta 'calcular_preco_item':\n- Placas de trânsito padrão CONTRAN: PARE (R-1, octogonal 60×60), R-2 (triangular 75 cm), R-3 a R-40 (redondas 50 cm) e placa de aço 50×50 com adesivo refletivo\n- Suportes para placa: madeira 3 m e tubo de aço 2,5\" 3 m; abraçadeiras 40 e 50 cm\n- Cones: PVC flexível 75 cm (norma NBR), PVC rígido 75 cm e balizador laranja 118 cm\n- Tachão e tachinha refletivos (com ou sem instalação)\n- Cavalete dupla face, pedestal zebrado com placa 30×40, correntes para pedestal (grande e pequena), bate-rodas em resina\n- Fitas de isolamento: zebrada e amarela/vermelha\n- Adesivos em vinil: de recorte e impresso (por m², precisam de medidas)\n3) QUALQUER OUTRO produto de sinalização que o cliente pedir e não esteja acima (lixeiras, espelhos convexos, EPIs, corte especial em laser/router, etc.): a empresa ATENDE SIM — mas quem monta esse orçamento é um especialista. Nesse caso diga com naturalidade que vai acionar um especialista para orçar e chame a ferramenta 'transferir'. NUNCA diga que \"não trabalha com\" o item, NUNCA mencione tabela ou sistema.\n\nFERRAMENTA 'calcular_preco_placa':\nÉ ela que calcula o preço de PLACA PERSONALIZADA (unitário e total), já com faixas por tamanho, mínimos e limite de chapa. Você NUNCA calcula de cabeça. Chame-a sempre que tiver material, tipo e medidas — para validar o tamanho e para gerar o orçamento.\nCampos: material (\"PVC\", \"ACM\", \"Aço\", \"Acrílico 2mm/3mm/4mm/5mm/10mm\" ou \"Lona\"); tipo (\"Normal\", \"Refletiva\", \"Fotoluminescente\" ou \"Impressão UV\"); largura (cm); altura (cm); quantidade; placa_endereco (true só se for placa de endereço).\nNÃO use esta ferramenta para placas de trânsito padrão (PARE/R-1, R-2, R-3 a R-40, placa de aço 50×50 refletiva) nem para itens do catálogo — para esses, use a 'calcular_preco_item'. Exceção: placa de trânsito em tamanho FORA do padrão é cotada aqui como placa de aço refletiva.\nComo reagir ao retorno:\n- ok=false por falta de medida → peça só a medida que faltou, gentilmente.\n- ok=false por material inválido, excede_chapa=true ou acima_do_limite_qtd=true (mais de 20 placas) → transfira com a ferramenta 'transferir', de forma acolhedora.\n- Deu certo → use EXATAMENTE valor_unitario e valor_total que voltarem. Nunca mostre campos internos nem explique como o preço saiu.\n\nFERRAMENTA 'calcular_preco_item':\nCalcula o preço de ITEM DO CATÁLOGO (unitário e total), já com o desconto por quantidade. Você NUNCA calcula de cabeça e NUNCA inventa preço de item.\nCampos: produto (o nome do item, do jeito que o cliente falou — ex.: \"suporte de madeira\", \"cone rígido\", \"placa de pare\"); quantidade (inteiro); largura e altura em cm (SOMENTE para adesivos).\nComo reagir ao retorno:\n- ok=true → use EXATAMENTE valor_unitario e valor_total. O campo 'nome' traz o nome oficial do item para você usar na conversa.\n- ambiguo=true → o campo 'erro' lista as opções; pergunte ao cliente qual ele quer, de forma simples (ex.: \"O tachão você prefere com ou sem instalação?\").\n- transferir=true → siga a instrução do campo 'erro': diga com naturalidade que um especialista vai montar esse orçamento e chame a 'transferir' na sequência.\n- ok=false por falta de medida (adesivos) → peça largura e altura.\n\nFERRAMENTA 'gerar_orcamento_pdf':\nGera o documento oficial de orçamento em PDF e devolve um link para você enviar ao cliente.\nUse SOMENTE quando o cliente aceitar receber o orçamento em documento (etapa de FECHAMENTO).\nRegras:\n- Antes de chamar, garanta que você tem o NOME do cliente (ou empresa) e peça também o CPF ou CNPJ para constar no documento, de forma leve. Ex.:\n\n\"Para eu montar o documento corretamente: sai em nome de quem?\n\nSe puder me passar o CPF ou CNPJ, já deixo tudo registrado.\"\n\n  Se a pessoa preferir não informar o documento, tudo bem — siga sem.\n- Envie TODOS os itens do pedido de UMA VEZ SÓ no campo 'itens' — placas personalizadas E itens de catálogo juntos, um objeto por item. NUNCA chame a ferramenta várias vezes para o mesmo orçamento.\n- Placa personalizada vai com: descricao, material, tipo, largura, altura, quantidade, placa_endereco. Se for PVC, o material vai SEMPRE com a espessura (ex.: \"PVC 2mm\").\n- Item de catálogo vai com: produto (use o valor do campo 'produto' que a calcular_preco_item retornou), quantidade e, se for adesivo, largura e altura.\n- Não envie preços: a ferramenta recalcula tudo sozinha com a mesma tabela oficial.\nComo reagir ao retorno:\n- ok=true → envie o link ao cliente de forma cordial, com o número da proposta, e siga o FECHAMENTO (transferência) descrito no passo 7. Ex.:\n\n\"Seu orçamento está pronto, proposta nº 1234:\n\n[link]\n\nEle tem validade de 15 dias.\"\n\n- ok=false → leia o campo 'erro': se faltou um dado (medida, espessura do PVC, nome), peça só o que falta; se a instrução for de atendente (excede chapa, quantidade acima do limite, produto fora da tabela, falha técnica), transfira com a ferramenta 'transferir' com naturalidade.\n- Nunca invente um link nem diga que o documento foi gerado sem a ferramenta ter retornado ok=true.\n\nFERRAMENTA 'transferir':\nTransfere a conversa para um atendente humano da equipe. Preencha SEMPRE os dois campos:\n- motivo: categoria curta — \"pedido do cliente\" | \"prazo\" | \"produto fora da tabela\" | \"corte especial\" | \"quantidade acima do limite\" | \"excede chapa\" | \"reclamação\" | \"andamento do pedido\" | \"falha técnica\" | \"fechamento — orçamento enviado\"\n- resumo: 2 a 4 frases para o atendente: o que o cliente quer, itens e valores já cotados, nome do cliente e o que falta resolver.\nChame IMEDIATAMENTE quando:\n- o cliente pedir para falar com uma pessoa (ou escrever HUMANO);\n- o cliente falar QUALQUER coisa sobre prazo (precisa antes, urgência, negociar data de entrega);\n- o cliente pedir produto que não está nas suas duas ferramentas de preço (diga que um especialista vai orçar — nunca que não trabalha com o item);\n- corte especial em laser ou router;\n- quantidade acima de 20 placas, acima de 100 unidades de um item, material fora do padrão, ou peça que excede a chapa;\n- reclamação, problema com pedido já feito, ou algo que você não resolve;\n- a gerar_orcamento_pdf retornar falha técnica;\n- FECHAMENTO: logo depois de enviar o link do documento de orçamento ao cliente (passo 7).\nDepois de chamar, avise o cliente com naturalidade que um atendente vai assumir a conversa em instantes (no fechamento, diga que um consultor vai dar sequência por ali mesmo). NUNCA use termos como \"transferência\", \"encaminhamento de conversa\", \"sistema\" ou \"atendimento automático\". Ex.:\n\n\"Esse caso eu prefiro passar para um atendente, para você ser atendido com mais precisão.\n\nUm instante, por favor.\"\n\nFLUXO (natural, sem soar robótico):\n\n1) ABERTURA (primeira mensagem):\nSe apresente como Camila, de forma cordial e breve, e pergunte o que o cliente precisa. NÃO mencione atendimento automático nem falar com humano. Ex.:\n\n\"Olá! Aqui é a Camila, da Sinaliza Pro.\n\nMe conta o que você está precisando que eu já te ajudo com o orçamento.\"\n\n2) ENTENDER O PEDIDO:\nSe o cliente ainda não disse o que quer, apresente as opções de forma prestativa, como quem ajuda a escolher (não pergunte de forma vaga). Ex.:\n\n\"Claro!\n\nTrabalhamos com placas personalizadas em PVC, ACM, Aço, Acrílico e Lona, e também com itens de sinalização viária: placas de trânsito, cones, tachões, suportes, fitas e adesivos.\n\nO que você está precisando?\"\n\nConforme o tipo do pedido, colete o que falta:\n- PLACA PERSONALIZADA: material, acabamento (normal, refletivo, fotoluminescente ou impressão UV), medidas (largura × altura em cm) e quantidade.\n  - Se for Acrílico, pergunte a espessura de forma simples (\"Qual a espessura do acrílico? Trabalhamos com 2, 3, 4, 5 e 10 mm\") — sempre.\n  - Se for PVC, pergunte a espessura da chapa também — sempre. A espessura não muda o preço, mas precisa constar no pedido e no documento.\n- ITEM DE CATÁLOGO: qual item e quantidade. Se a calcular_preco_item devolver ambiguidade, pergunte a variação (ex.: com ou sem instalação; cone flexível, rígido ou balizador).\n- ADESIVO: além da quantidade, as medidas (largura × altura em cm).\n- PLACA DE TRÂNSITO padrão (PARE, regulamentação): é item de catálogo, nos tamanhos padrão — não pergunte medidas; se o cliente quiser tamanho diferente do padrão, trate como placa personalizada de aço refletiva.\nInterprete o que o cliente escreve e normalize (em silêncio) para as ferramentas: \"uv\"→\"Impressão UV\"; \"refletiva/refletivo\"→\"Refletiva\"; \"foto/luminescente\"→\"Fotoluminescente\"; \"normal/simples/comum\"→\"Normal\"; \"acrílico\"→\"Acrílico\"+espessura; \"pvc\"→\"PVC\"+espessura; \"aço/aco\"→\"Aço\".\nSe algo ficar mesmo ambíguo, confirme numa frase curta e simples — sem explicar o motivo técnico.\n\n3) VALIDAR (silencioso):\nAssim que tiver os dados de um item, chame a ferramenta de preço correspondente só para validar. NÃO mostre preço ainda.\nSe a quantidade passar de 20 placas, ou o retorno mandar transferir (quantidade acima do limite, material fora do padrão, peça que excede a chapa, produto fora da tabela, corte especial) → transfira com a ferramenta 'transferir', de um jeito acolhedor.\n\n4) CONFIRMAR (sempre, mas natural):\nRecapitule numa frase leve e peça o ok. Inclua tudo o que o cliente pediu — conversado, não em lista. Ex.:\n\n\"Então ficou assim: 9 placas de aço fotoluminescente, 55×60 cm, e 9 suportes de madeira de 3 metros.\n\nPosso calcular para você?\"\n\nNunca pule essa confirmação.\n\n5) CALCULAR (só depois do ok):\nChame as ferramentas de preço com os dados confirmados (placas na calcular_preco_placa, itens na calcular_preco_item). Use exatamente os valores retornados. Nunca faça conta na mão — nem para somar o total geral: some apenas os totais que as ferramentas retornarem.\n\n6) ORÇAMENTO (natural):\nPasse os valores de um jeito claro e cordial, sempre com unitário e total. Em pedido com vários itens, diga o valor de cada um e o total geral. Ex.:\n\n\"Perfeito!\n\nAs 9 placas ficaram R$ 246,00 cada, totalizando R$ 2.214,00. Os 9 suportes de madeira, R$ 121,42 cada, totalizando R$ 1.092,78.\n\nO pedido completo fica em R$ 3.306,78.\"\n\n(Se for 1 item só, pode dizer o valor uma vez.)\n\n7) FECHAMENTO:\nLogo depois do valor, ofereça formalizar o orçamento num documento. Ex.:\n\n\"Quer que eu formalize isso em um documento de orçamento em PDF?\"\n\nSe o cliente aceitar:\n- confirme o nome do cliente/empresa e peça o CPF ou CNPJ (se preferir não informar, siga sem);\n- chame a 'gerar_orcamento_pdf' com TODOS os itens de uma vez (placas e itens de catálogo juntos);\n- envie o link retornado ao cliente, com o número da proposta e a validade de 15 dias;\n- na sequência, chame a 'transferir' (motivo \"fechamento — orçamento enviado\"; no resumo, os itens, o total e o nome do cliente) e diga ao cliente, com naturalidade, que um consultor da equipe vai dar sequência com ele por ali mesmo (pagamento, produção e retirada).\nSe o cliente não quiser o documento, siga direto para o pagamento/produção abaixo, sem transferir.\n\nPAGAMENTO:\nPIX (CNPJ): 00.000.000/0000-00\n- Se o cliente pedir desconto, ofereça 1% no PIX.\n- Não ofereça desconto por conta própria.\n\nPRAZO DE PRODUÇÃO (informe só o prazo, em dias úteis, com base no valor total do pedido):\n- até R$ 100 → até 2 dias úteis\n- até R$ 200 → até 3 dias úteis\n- até R$ 1.000 → até 4 dias úteis\n- até R$ 3.000 → até 5 dias úteis\n- até R$ 5.000 → até 7 dias úteis\n- até R$ 10.000 → até 8 dias úteis\n- até R$ 20.000 → até 10 dias úteis\n- até R$ 30.000 → até 12 dias úteis\n- acima de R$ 30.000 → prazo a combinar: diga que um atendente vai confirmar o prazo exato e transfira com a ferramenta 'transferir'.\nSe o cliente falar QUALQUER coisa sobre o prazo (precisa antes, tem urgência, quer negociar a data): diga que nossa equipe irá priorizar a demanda para tentar entregar antes do prazo informado, e transfira com a ferramenta 'transferir'.\n\nRETIRADA DO PEDIDO:\nOriente o cliente a retirar só depois que um atendente confirmar que está pronto.\nEndereço: Av. Exemplo, 123 - Centro, Cidade Exemplo - UF, 00000-000\nLocalização: https://maps.app.goo.gl/EXEMPLO\nSe perguntar sobre entrega: a entrega é terceirizada (por Uber, por exemplo, com taxa). Peça o endereço para verificar o valor. A instalação de tachões e tachinhas \"com instalação\" é combinada com o atendente.\n\nREGRAS QUE NÃO PODEM SER QUEBRADAS:\n- Nunca escreva a mensagem toda em uma linha só — sempre quebre em blocos separados por linha vazia.\n- Nunca use emojis.\n- Nunca calcule nem some preço de cabeça — sempre as ferramentas.\n- Nunca invente preços, mínimos, medidas ou itens de catálogo.\n- Sempre confirme antes de gerar o orçamento.\n- Sempre use exatamente os valores que as ferramentas retornarem.\n- Nunca mostre campos internos nem explique o cálculo (faixas, mínimos, regras, slugs).\n- Acrílico e PVC: nunca siga sem a espessura. Adesivo: nunca siga sem as medidas.\n- Se o cliente pedir para falar com uma pessoa ou tocar no assunto prazo, use a ferramenta 'transferir' na hora.\n- Produto que suas ferramentas não cotam: diga que um especialista vai orçar e transfira — nunca diga que não trabalha com o item.\n- Depois de enviar o link do documento de orçamento, sempre chame a 'transferir' (fechamento).\n- Nunca invente um link de documento.\n\nOBJETIVO FINAL:\nAtender com cordialidade e naturalidade, gerar orçamentos corretos de placas e itens, e conduzir o cliente até o fechamento com clareza.\n\nATENDIMENTO DE RETORNO (cliente que já conversou antes):\nSe já houver histórico de conversa com este cliente, NÃO se apresente de novo como se fosse a primeira mensagem e NÃO recomece a coleta do zero. Cumprimente de forma breve e retome de onde a conversa parou, usando o que já foi dito e cotado.\n\nSTATUS DO PEDIDO DESTE CLIENTE: {{ $('setMessage').item.json.statusPedido }}\nQuando o cliente perguntar se o pedido já entrou em produção, está pronto ou foi entregue, responda com base nesse status:\n- \"sem\": não há pedido em produção registrado. Se o cliente afirma ter um pedido em andamento, chame a ferramenta 'transferir' com motivo \"andamento do pedido\" e um resumo do que ele está perguntando.\n- \"em_producao\": diga que o pedido está em produção e que a equipe avisa assim que ficar pronto. Se pedir prazo ou algum detalhe específico, chame 'transferir' com motivo \"andamento do pedido\".\n- \"pronto\": diga que o pedido está pronto para retirada e passe o endereço (Av. Exemplo, 123 - Centro, Cidade Exemplo - UF, 00000-000).\n- \"entregue\": diga que consta como entregue; se houver algum problema, chame 'transferir' com motivo \"reclamação\".\nNunca invente status do pedido. Use exatamente o que está indicado acima.",
+          "maxIterations": 30,
+          "returnIntermediateSteps": false
+        }
+      },
+      "id": "f34c57dd-068e-4e53-b0de-d714a23daee9",
+      "name": "AI Agent1",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        1776,
+        2512
+      ]
+    },
+    {
+      "parameters": {
+        "multipleMethods": true,
+        "path": "sdr",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -3632,
+        2560
+      ],
+      "id": "6862638a-0519-4089-a493-ccabb4e31bc6",
+      "name": "Webhook1"
+    },
+    {
+      "parameters": {
+        "toolDescription": "=Transfere a conversa para um atendente humano da Sinaliza Pro. Chame IMEDIATAMENTE quando: (1) o cliente pedir para falar com uma pessoa (ou escrever HUMANO); (2) o cliente falar QUALQUER coisa sobre prazo de produção (precisa antes, urgência, negociar data de entrega, reclamar do prazo) — pergunta sobre COMO funciona a entrega/retirada NÃO é gatilho, responda pelo roteiro; (3) o cliente pedir produto ou serviço que as ferramentas de preço não cotam — produto fora da tabela ou corte especial em laser/router — dizendo ao cliente apenas que um especialista vai preparar o orçamento; (4) quantidade acima de 20 placas ou acima de 100 unidades de um item, material fora do padrão, ou peça que excede a chapa; (5) reclamação, problema com pedido já feito, ou solicitação especial que você não resolve; (6) a ferramenta gerar_orcamento_pdf retornar falha técnica; (7) FECHAMENTO: logo depois de enviar ao cliente o link do documento de orçamento gerado.\n\nPreencha SEMPRE os dois campos: motivo (categoria curta: pedido do cliente | prazo | produto fora da tabela | corte especial | quantidade acima do limite | excede chapa | reclamação | andamento do pedido | falha técnica | fechamento — orçamento enviado) e resumo (2 a 4 frases para o atendente: o que o cliente quer, itens e valores já cotados, nome e contato do cliente se souber, e o que ainda falta resolver).\n\nDEPOIS de chamar, avise o cliente com naturalidade que um atendente vai assumir a conversa em instantes — no fechamento, diga que um consultor vai dar sequência por ali mesmo. Se o assunto for prazo, diga antes que nossa equipe irá priorizar a demanda para tentar entregar antes do prazo informado. NUNCA FALE SOBRE TRANSFERÊNCIA OU ENCAMINHAMENTO DE CONVERSA (termos de sistema)!! Nunca diga que você é um robô.\n\nAqui está o {remoteJid}: {{ $('global_var').first().json.telefone }}\n\nO {nome} do Lead aqui {{ $('global_var').first().json.pushname }}",
+        "method": "POST",
+        "url": "https://SEU-N8N.exemplo.com/webhook/transferencia",
+        "sendBody": true,
+        "parametersBody": {
+          "values": [
+            {
+              "name": "remoteJid",
+              "valueProvider": "fieldValue",
+              "value": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "name": "nome",
+              "valueProvider": "fieldValue",
+              "value": "={{ $('global_var').first().json.pushname }}"
+            },
+            {
+              "name": "cliente",
+              "valueProvider": "fieldValue",
+              "value": "={{ $('global_var').first().json.cliente}}"
+            },
+            {
+              "name": "responsavel",
+              "valueProvider": "fieldValue",
+              "value": "={{ $('global_var').first().json.responsavel }}"
+            },
+            {
+              "name": "url",
+              "valueProvider": "fieldValue",
+              "value": "={{ $('global_var').item.json[\"http-uazapi\"] }}"
+            },
+            {
+              "name": "apikey-cliente",
+              "valueProvider": "fieldValue",
+              "value": "={{ $('global_var').item.json[\"apikey-uazapi\"] }}"
+            },
+            {
+              "name": "motivo"
+            },
+            {
+              "name": "resumo"
+            }
+          ]
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        1760,
+        2912
+      ],
+      "id": "c0ae2045-c084-450e-a64b-fe4b95d26cbb",
+      "name": "transferir"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ad0f3ced-5972-4a3d-b0c0-af4472f57de0",
+              "leftValue": "={{ $json.na_lista }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -2800,
+        2640
+      ],
+      "id": "b5375aa7-a01b-48d8-9958-51a98df2f005",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "description": "Calcula o preço final (unitário e total) de ITENS DO CATÁLOGO de sinalização da Sinaliza Pro (Tabela 2026), aplicando automaticamente o desconto por faixa de quantidade. Você NUNCA deve calcular manualmente nem inventar preço de item.\n\nCampos da query:\n- produto (texto, obrigatório): o item desejado, do jeito que o cliente falou (ex.: \"suporte de madeira\", \"cone rígido\", \"placa de pare\", \"fita zebrada\") ou o slug oficial retornado por esta ferramenta.\n- quantidade (número inteiro, obrigatório): até 100 — acima disso a ferramenta orienta transferir.\n- largura e altura (números, em cm): SOMENTE para adesivos (de recorte ou impresso), que são cobrados por m².\n\nItens disponíveis: abraçadeiras 40/50 cm; adesivo de recorte; adesivo impresso; bate-rodas em resina; cone balizador laranja 118 cm; cone PVC flexível 75 cm (NBR 15.071); cone PVC rígido 75 cm; corrente para pedestal (grande/pequena); pedestal zebrado com placa 30×40; placa de aço 50×50 com refletivo; placas de trânsito CONTRAN R-1 (PARE), R-2 e R-3 a R-40; suporte para placa em madeira 3 m; suporte em tubo de aço 2,5\" 3 m; tachão birefletivo (com/sem instalação); tachinha refletiva (com/sem instalação); cavalete dupla face; fita zebrada; fita amarela/vermelha.\n\nRetorna JSON: { ok:true, produto, nome, quantidade, faixa, valor_unitario, valor_total } ou { ok:false, erro, ... }:\n- ambiguo=true → pergunte ao cliente qual variação (o erro lista as opções);\n- transferir=true → siga a instrução do campo erro e chame a ferramenta 'transferir' (produto fora da tabela, corte especial laser/router, quantidade acima de 100);\n- falta de medida (adesivos) → peça largura e altura.\n\nNÃO use esta ferramenta para placas personalizadas sob medida — essas são da calcular_preco_placa.\n",
+        "jsCode": "/* ============================================================================\n   FERRAMENTA (Tool) — calcular_preco_item   |   Sinaliza Pro\n   *** ATENÇÃO: esta tabela de preços existe nos 3 nodes de preço (placa, item e orçamento PDF). Ao alterar valores, atualize os três. ***\n   Tabela de Preços 2026. Entrada: objeto `query`. Saída: string JSON.\n============================================================================ */\n\n// ─────────────────────────── PLACAS PERSONALIZADAS ───────────────────────────\n// Preço/m² de referência (faixa \"100\") por material+acabamento; ±5% por faixa\n// de tamanho pelo MAIOR lado; mínimos por material; limite de chapa.\nconst TAXA = 0.05;\nconst FAIXAS = [\n  [0, 4], [30, 3], [40, 2], [60, 1], [100, 0], [130, -1], [170, -2],\n];\nconst MATERIAIS = {\n  \"PVC\":           { nome:\"PVC\",           desc:\"chapa de PVC expandido\",              banda:\"larga\",    min:25, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":550,  \"Refletiva\":880,  \"Fotoluminescente\":880,  \"Impressao UV\":550 } },\n  \"ACM\":           { nome:\"ACM\",           desc:\"chapa de ACM\",                        banda:\"larga\",    min:25, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":700,  \"Refletiva\":1040,  \"Fotoluminescente\":1040,  \"Impressao UV\":700 } },\n  \"Aco\":           { nome:\"Aço\",           desc:\"chapa de aço, pintura eletrostática\", banda:\"larga\",    min:40, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":710,  \"Refletiva\":710,  \"Fotoluminescente\":710,  \"Impressao UV\":710 } },\n  \"Acrilico 2mm\":  { nome:\"Acrílico 2mm\",  desc:\"acrílico 2 mm\",                       banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":970,  \"Refletiva\":970,  \"Fotoluminescente\":970,  \"Impressao UV\":970 } },\n  \"Acrilico 3mm\":  { nome:\"Acrílico 3mm\",  desc:\"acrílico 3 mm\",                       banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":1170,  \"Refletiva\":1170,  \"Fotoluminescente\":1170,  \"Impressao UV\":1170 } },\n  \"Acrilico 4mm\":  { nome:\"Acrílico 4mm\",  desc:\"acrílico 4 mm\",                       banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":1040,  \"Refletiva\":1040,  \"Fotoluminescente\":1040,  \"Impressao UV\":1040 } },\n  \"Acrilico 5mm\":  { nome:\"Acrílico 5mm\",  desc:\"acrílico 5 mm\",                       banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":1340, \"Refletiva\":1340, \"Fotoluminescente\":1340, \"Impressao UV\":1340 } },\n  \"Acrilico 10mm\": { nome:\"Acrílico 10mm\", desc:\"acrílico 10 mm\",                      banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":1680, \"Refletiva\":1680, \"Fotoluminescente\":1680, \"Impressao UV\":1680 } },\n  \"Lona\":          { nome:\"Lona\",          desc:\"lona\",                                banda:\"fixa\",     min:95, minPlacaEnd:100, largMax:320, altMax:5000,\n                     tipos:{ \"Normal\":370,  \"Refletiva\":370,  \"Fotoluminescente\":370,  \"Impressao UV\":370 } },\n};\nconst TIPO_NOME = { \"Normal\":\"Normal\", \"Refletiva\":\"Refletiva\", \"Fotoluminescente\":\"Fotoluminescente\", \"Impressao UV\":\"Impressão UV\" };\n\n// ─────────────────────────── ITENS DE CATÁLOGO (Tabela 2026) ───────────────────────────\n// Preço UNITÁRIO por faixa de QUANTIDADE (limites inclusivos). Valores FICTÍCIOS de exemplo (demo): substitua pela sua própria tabela de preços.\n// célula a célula do PDF oficial — NÃO derivar por fórmula, NÃO \"corrigir\" anomalias.\n// porM2: preço é por m² (exige largura×altura), mínimo R$ 15,00 por peça.\nconst FAIXAS_QTD = [\n  { min: 1,  max: 1,   rotulo: \"1\"      },\n  { min: 2,  max: 5,   rotulo: \"2-5\"    },\n  { min: 6,  max: 10,  rotulo: \"6-10\"   },\n  { min: 11, max: 20,  rotulo: \"11-20\"  },\n  { min: 21, max: 40,  rotulo: \"21-40\"  },\n  { min: 41, max: 50,  rotulo: \"41-50\"  },\n  { min: 51, max: 100, rotulo: \"51-100\" },\n];\nconst QTD_MAX_ITEM = 100;\nconst MINIMO_ADESIVO = 15;\n\nconst CATALOGO = {\n  \"abracadeira_40cm\": {\n    nome: \"Abraçadeira de 40 cm\",\n    specs: [\"Abraçadeira para fixação de placa em poste\", \"Tamanho: 40 cm\"],\n    precos: [75.90, 74.39, 72.87, 71.35, 68.43, 68.31, 66.80],\n  },\n  \"abracadeira_50cm\": {\n    nome: \"Abraçadeira de 50 cm\",\n    specs: [\"Abraçadeira para fixação de placa em poste\", \"Tamanho: 50 cm\"],\n    precos: [75.51, 74.00, 72.49, 70.98, 68.08, 67.96, 66.45],\n  },\n  \"adesivo_recorte\": {\n    nome: \"Adesivo de recorte\", porM2: true,\n    specs: [\"Adesivo vinil de recorte\", \"Valor por m²\"],\n    precos: [225.96, 221.45, 216.93, 212.41, 203.73, 203.37, 198.85],\n  },\n  \"adesivo_impresso\": {\n    nome: \"Adesivo impresso\", porM2: true,\n    specs: [\"Adesivo vinil impresso\", \"Valor por m²\"],\n    precos: [271.49, 266.06, 260.63, 255.20, 244.77, 244.34, 238.91],\n  },\n  \"bate_rodas\": {\n    nome: \"Bate-rodas em resina\",\n    specs: [\"Bate-rodas em resina\", \"Dimensões: 49 × 17 × 8,5 cm\"],\n    precos: [127.92, 125.36, 122.80, 120.24, 115.33, 115.13, 112.57],\n  },\n  \"cone_balizador_118cm\": {\n    nome: \"Cone balizador laranja com faixa refletiva, 118 cm\",\n    specs: [\"Cone balizador laranja com faixas refletivas (94 mm)\", \"Altura: 118 cm · base 40 cm\"],\n    precos: [204.56, 200.47, 196.38, 192.29, 184.43, 184.10, 180.01],\n  },\n  \"cone_flexivel_75cm\": {\n    nome: \"Cone de PVC flexível 75 cm (NBR 15.071)\",\n    specs: [\"Cone para sinalização viária em PVC flexível\", \"Duas faixas refletivas brancas tipo colmeia\", \"Altura: 75 cm · peso 3 a 4 kg · atende NBR 15.071\"],\n    precos: [115.85, 113.53, 111.22, 108.90, 104.45, 104.27, 101.95],\n  },\n  \"cone_rigido_75cm\": {\n    nome: \"Cone de PVC rígido 75 cm\",\n    specs: [\"Cone para sinalização viária em PVC rígido\", \"Duas faixas refletivas brancas tipo colmeia\", \"Altura: 75 cm\"],\n    precos: [49.97, 48.98, 47.98, 46.98, 45.06, 44.98, 43.98],\n  },\n  \"corrente_pedestal_grande\": {\n    nome: \"Corrente para pedestal — grande\",\n    specs: [\"Corrente plástica para pedestal\", \"Tamanho grande\"],\n    precos: [10.38, 10.18, 9.97, 9.76, 9.36, 9.34, 9.14],\n  },\n  \"corrente_pedestal_pequena\": {\n    nome: \"Corrente para pedestal — pequena\",\n    specs: [\"Corrente plástica para pedestal\", \"Tamanho pequeno\"],\n    precos: [6.95, 6.82, 6.68, 6.54, 6.27, 6.26, 6.12],\n  },\n  \"pedestal_zebrado\": {\n    nome: \"Pedestal zebrado com placa 30×40 cm personalizada\",\n    specs: [\"Pedestal zebrado\", \"Placa 30 × 40 cm personalizada inclusa\"],\n    precos: [160.26, 152.24, 147.44, 141.03, 130.93, 136.22, 128.20],\n  },\n  \"placa_aco_50x50_refletiva\": {\n    nome: \"Placa de aço 50×50 cm com adesivo refletivo\",\n    specs: [\"Chapa de aço galvanizada nº 18 (1,25 mm), pintura eletrostática\", \"Revestimento em adesivo refletivo\", \"Dimensões: 50 × 50 cm — sem instalação\"],\n    precos: [270.11, 256.60, 248.50, 237.69, 220.68, 229.59, 216.08],\n  },\n  \"placa_transito_r1\": {\n    nome: \"Placa de trânsito R-1 (PARE) octogonal 60×60 cm\",\n    specs: [\"Chapa de aço galvanizada nº 18 (1,25 mm), pintura eletrostática\", \"Adesivo vinil refletivo (5 anos), padrão CONTRAN\", \"Octogonal 60 × 60 cm — sem instalação\"],\n    precos: [423.74, 415.27, 406.79, 398.32, 382.04, 381.37, 372.89],\n  },\n  \"placa_transito_r2\": {\n    nome: \"Placa de trânsito R-2 triangular 75×75×75 cm\",\n    specs: [\"Chapa de aço galvanizada nº 18 (1,25 mm), pintura eletrostática\", \"Adesivo vinil refletivo importado (5 anos), padrão CONTRAN\", \"Triangular 75 × 75 × 75 cm — sem instalação\"],\n    precos: [534.77, 508.03, 491.99, 470.60, 436.91, 454.55, 427.82],\n  },\n  \"placa_transito_r3_a_r40\": {\n    nome: \"Placa de trânsito R-3 a R-40 redonda ⌀50 cm\",\n    specs: [\"Chapa de aço galvanizada nº 18 (1,25 mm), pintura eletrostática\", \"Adesivo vinil refletivo importado (7 anos), padrão CONTRAN\", \"Redonda ⌀ 50 cm · verso preto fosco — sem instalação\"],\n    precos: [225.64, 221.13, 216.61, 212.10, 203.44, 203.08, 198.56],\n  },\n  \"suporte_madeira_3m\": {\n    nome: \"Suporte para placa em madeira, 3 metros\",\n    specs: [\"Suporte para placa em madeira\", \"Comprimento: 3 metros\"],\n    precos: [126.48, 123.95, 121.42, 118.89, 114.03, 113.83, 111.30],\n  },\n  \"suporte_tubo_aco_3m\": {\n    nome: \"Suporte para placa em tubo de aço 2,5\\\", 3 metros\",\n    specs: [\"Suporte para placa em tubo de aço 2,5\\\"\", \"Comprimento: 3 metros\"],\n    precos: [278.93, 273.35, 267.77, 262.19, 251.48, 251.03, 245.45],\n  },\n  \"tachao_com_instalacao\": {\n    nome: \"Tachão birefletivo — com instalação\",\n    specs: [\"Tachão birefletivo em resina, trapezoidal\", \"Dimensões: 25 × 15 × 5 cm\", \"Com instalação\"],\n    precos: [135.24, 132.54, 129.83, 127.13, 121.94, 121.72, 119.01],\n  },\n  \"tachao_sem_instalacao\": {\n    nome: \"Tachão birefletivo — sem instalação\",\n    specs: [\"Tachão birefletivo em resina, trapezoidal\", \"Dimensões: 25 × 15 × 5 cm\", \"Sem instalação\"],\n    precos: [58.91, 57.73, 56.55, 55.38, 53.12, 53.02, 51.84],\n  },\n  \"tachinha_com_instalacao\": {\n    nome: \"Tachinha refletiva amarela — com instalação\",\n    specs: [\"Tachinha refletiva em resina, monodirecional\", \"Cor amarela\", \"Com instalação\"],\n    precos: [87.79, 86.04, 84.28, 82.53, 79.15, 79.02, 77.26],\n  },\n  \"tachinha_sem_instalacao\": {\n    nome: \"Tachinha refletiva amarela — sem instalação\",\n    specs: [\"Tachinha refletiva em resina, monodirecional\", \"Cor amarela\", \"Sem instalação\"],\n    precos: [63.31, 62.05, 60.78, 59.51, 57.08, 56.98, 55.72],\n  },\n  \"cavalete_dupla_face\": {\n    nome: \"Cavalete dupla face amarelo\",\n    specs: [\"Cavalete de sinalização dupla face\", \"Cor amarela\"],\n    precos: [91.07, 86.51, 83.78, 80.14, 74.41, 77.41, 72.85],\n  },\n  \"fita_zebrada\": {\n    nome: \"Fita zebrada\",\n    specs: [\"Fita zebrada para isolamento de área (rolo)\"],\n    precos: [21.48, 20.40, 19.76, 18.90, 17.55, 18.25, 17.18],\n  },\n  \"fita_amarela_vermelha\": {\n    nome: \"Fita amarela/vermelha\",\n    specs: [\"Fita amarela/vermelha para isolamento de área (rolo)\"],\n    precos: [28.99, 27.54, 26.67, 25.51, 23.69, 24.64, 23.19],\n  },\n};\n\n// ─────────────────────────── HELPERS ───────────────────────────\nconst norm = s => String(s ?? \"\").normalize(\"NFD\").replace(/[̀-ͯ]/g, \"\").toLowerCase().trim();\n\n// formata em reais SEM depender de Intl (seguro no sandbox da ferramenta)\nfunction brl(v){\n  const [i, d] = Number(v).toFixed(2).split(\".\");\n  return \"R$ \" + i.replace(/\\B(?=(\\d{3})+(?!\\d))/g, \".\") + \",\" + d;\n}\nfunction round2(v){ return Math.round((v + Number.EPSILON) * 100) / 100; }\nfunction numCm(v){\n  if (typeof v === \"number\") return v;\n  const s = String(v).toLowerCase().replace(\",\", \".\");\n  const n = parseFloat(s.replace(/[^0-9.]/g, \"\"));\n  if (isNaN(n)) return NaN;\n  if (/m\\s*$/.test(s) && !/[cm]m\\s*$/.test(s)) return n * 100; // sufixo \"m\" isolado = metros: \"1,5m\" -> 150\n  return n;\n}\n\n// ─────────────────────────── CÁLCULO DE PLACAS ───────────────────────────\nfunction acharMaterial(txt){\n  const t = norm(txt);\n  if (t.includes(\"pvc\")) return \"PVC\";\n  if (t.includes(\"acm\")) return \"ACM\";\n  if (t.includes(\"acril\")) {\n    const mm  = (t.match(/(\\d+)\\s*mm/) || [])[1];\n    const esp = [\"2\",\"3\",\"4\",\"5\",\"10\"].includes(mm) ? mm : \"2\"; // sem espessura => 2mm\n    return \"Acrilico \" + esp + \"mm\";\n  }\n  if (t.includes(\"lona\")) return \"Lona\";\n  if (t.includes(\"aco\") || t.includes(\"metal\")) return \"Aco\";\n  return null;\n}\nfunction acharTipo(txt){\n  const t = norm(txt);\n  if (t.includes(\"reflet\")) return \"Refletiva\";\n  if (t.includes(\"foto\") || t.includes(\"luminescente\")) return \"Fotoluminescente\";\n  if (t.includes(\"uv\") || t.includes(\"impress\")) return \"Impressao UV\";\n  return \"Normal\";\n}\nfunction faixaExpoente(maior, banda){\n  let b = 4;\n  for (const [lim, exp] of FAIXAS) if (maior >= lim) b = exp;\n  if (banda === \"estreita\" && b < -1) b = -1; // acrílicos param na faixa -1\n  return b;\n}\nfunction valorM2(refM2, maior, banda){\n  if (banda === \"fixa\") return refM2; // Lona: m² fixo\n  const b = faixaExpoente(maior, banda);\n  return b >= 0 ? refM2 * Math.pow(1 + TAXA, b) : refM2 * Math.pow(1 - TAXA, -b);\n}\n\n// opts.exigirEspessuraPvc: true no documento de orçamento (a espessura precisa constar)\nfunction calcularPrecoPlaca({ material, tipo, largura, altura, quantidade = 1, placaEndereco = false }, opts){\n  opts = opts || {};\n  const mat = acharMaterial(material);\n  if (!mat) return { ok:false, erro:`material não reconhecido (\"${material}\"). Use PVC, ACM, Aço, Acrílico (2/3/4/5/10 mm) ou Lona.` };\n  const cfg   = MATERIAIS[mat];\n  const tp    = acharTipo(tipo);\n  const refM2 = cfg.tipos[tp];\n\n  // PVC: se a espessura veio no texto, ela entra no nome; no documento é obrigatória\n  let nomeMat = cfg.nome, descMat = cfg.desc;\n  if (mat === \"PVC\") {\n    const espPvc = (norm(material).match(/(\\d+)\\s*mm/) || [])[1];\n    if (espPvc) { nomeMat = `PVC ${espPvc}mm`; descMat = `chapa de PVC ${espPvc}mm`; }\n    else if (opts.exigirEspessuraPvc) return { ok:false, erro:'informe a espessura do PVC no material (ex.: \"PVC 2mm\").' };\n  }\n\n  const L = numCm(largura), A = numCm(altura);\n  if (!(L > 0) || !(A > 0)) return { ok:false, erro:\"faltam as medidas. Informe largura e altura em centímetros.\" };\n\n  const qtd    = Math.max(1, Math.round(Number(quantidade) || 1));\n  const maior  = Math.max(L, A), menor = Math.min(L, A);\n  const m2     = valorM2(refM2, maior, cfg.banda);\n  const areaM2 = (L / 100) * (A / 100);\n  const calc   = Math.round(areaM2 * m2);\n  const minimo = placaEndereco ? cfg.minPlacaEnd : cfg.min;\n  const unit   = Math.max(calc, minimo);\n  const total  = unit * qtd;\n  const cabe   = menor <= Math.min(cfg.largMax, cfg.altMax) && maior <= Math.max(cfg.largMax, cfg.altMax);\n\n  return {\n    ok:true, material:nomeMat, materialDesc:descMat, tipo:TIPO_NOME[tp],\n    largura_cm:L, altura_cm:A, quantidade:qtd,\n    faixa: cfg.banda === \"fixa\" ? 0 : faixaExpoente(maior, cfg.banda),\n    preco_m2_aplicado:+m2.toFixed(2),\n    areaM2, unitario:unit, total,\n    valor_unitario:brl(unit), valor_total:brl(total),\n    dentro_do_limite:cabe,\n  };\n}\n\n// ─────────────────────────── CÁLCULO DE ITENS DE CATÁLOGO ───────────────────────────\nfunction faixaQuantidade(qtd){\n  for (let i = 0; i < FAIXAS_QTD.length; i++) {\n    if (qtd >= FAIXAS_QTD[i].min && qtd <= FAIXAS_QTD[i].max) return { idx:i, rotulo:FAIXAS_QTD[i].rotulo };\n  }\n  return null; // acima de 100\n}\n\n// Resolve o texto do cliente/agente para um item do catálogo.\n// Retorna { slug } | { ambiguo:[slugs] } | { corte:true } | { usarPlaca:true } | null\n// A ORDEM das regras importa (validada por testes): sinais explícitos de placa de\n// trânsito primeiro; depois famílias de itens; depois materiais de placa personalizada\n// (redirect); por último heurísticas de forma (redonda/triangular) e \"aço\" genérico.\nfunction resolverItem(texto){\n  const t = norm(texto).replace(/[_\\-]/g, \" \");\n\n  // slug exato (com _ ou espaço)\n  const slugTry = norm(texto).replace(/\\s+/g, \"_\").replace(/-/g, \"_\");\n  if (CATALOGO[slugTry]) return { slug: slugTry };\n\n  const has = (...ws) => ws.some(w => t.includes(w));\n\n  // corte especial: não cotável. \"\\bcorte\\b\" não captura \"recorte\"; e \"adesivo/vinil\n  // de corte\" é o adesivo de recorte do catálogo, não corte especial.\n  if (!has(\"adesivo\", \"vinil\") && /(\\bcorte\\b|\\blaser\\b|\\brouter\\b|\\bcnc\\b)/.test(t)) return { corte:true };\n\n  // placas de trânsito CONTRAN — sinais EXPLÍCITOS (antes de tudo, para \"placa de\n  // pare com suporte\" não virar suporte)\n  if (/\\bpare\\b/.test(t) || /\\br\\s*[- ]?1\\b/.test(t)) return { slug:\"placa_transito_r1\" };\n  if (/\\br\\s*[- ]?2\\b/.test(t)) return { slug:\"placa_transito_r2\" };\n  if (/\\br\\s*[- ]?([3-9]|[1-3][0-9]|40)\\b/.test(t)) return { slug:\"placa_transito_r3_a_r40\" };\n  if (has(\"50x50\", \"50 x 50\") && has(\"aco\", \"aço\")) return { slug:\"placa_aco_50x50_refletiva\" };\n\n  // famílias de itens do catálogo\n  if (has(\"abracadeira\", \"abraçadeira\")) {\n    if (t.includes(\"40\")) return { slug:\"abracadeira_40cm\" };\n    if (t.includes(\"50\")) return { slug:\"abracadeira_50cm\" };\n    return { ambiguo:[\"abracadeira_40cm\", \"abracadeira_50cm\"] };\n  }\n  if (has(\"bate roda\", \"bate-roda\", \"baterroda\", \"baterodas\", \"bate rodas\")) return { slug:\"bate_rodas\" };\n  if (has(\"balizador\")) return { slug:\"cone_balizador_118cm\" };\n  if (has(\"cone\")) {\n    if (has(\"118\")) return { slug:\"cone_balizador_118cm\" };\n    if (has(\"flexivel\", \"flexível\", \"nbr\")) return { slug:\"cone_flexivel_75cm\" };\n    if (has(\"rigido\", \"rígido\")) return { slug:\"cone_rigido_75cm\" };\n    return { ambiguo:[\"cone_flexivel_75cm\", \"cone_rigido_75cm\", \"cone_balizador_118cm\"] };\n  }\n  if (has(\"corrente\")) {\n    if (has(\"grande\")) return { slug:\"corrente_pedestal_grande\" };\n    if (has(\"pequen\")) return { slug:\"corrente_pedestal_pequena\" };\n    return { ambiguo:[\"corrente_pedestal_grande\", \"corrente_pedestal_pequena\"] };\n  }\n  if (has(\"pedestal\")) return { slug:\"pedestal_zebrado\" };\n  if (has(\"tachao\", \"tachoes\")) {\n    if (/sem\\s+instal/.test(t)) return { slug:\"tachao_sem_instalacao\" };\n    if (/com\\s+instal|instalad/.test(t)) return { slug:\"tachao_com_instalacao\" };\n    return { ambiguo:[\"tachao_com_instalacao\", \"tachao_sem_instalacao\"] };\n  }\n  if (/\\btach(a|as|inha|inhas)\\b/.test(t)) {\n    if (/sem\\s+instal/.test(t)) return { slug:\"tachinha_sem_instalacao\" };\n    if (/com\\s+instal|instalad/.test(t)) return { slug:\"tachinha_com_instalacao\" };\n    return { ambiguo:[\"tachinha_com_instalacao\", \"tachinha_sem_instalacao\"] };\n  }\n  if (has(\"cavalete\")) return { slug:\"cavalete_dupla_face\" };\n  if (has(\"fita\")) {\n    if (has(\"zebrad\")) return { slug:\"fita_zebrada\" };\n    if (has(\"amarel\", \"vermelh\")) return { slug:\"fita_amarela_vermelha\" };\n    return { ambiguo:[\"fita_zebrada\", \"fita_amarela_vermelha\"] };\n  }\n  if (has(\"adesivo\", \"vinil\")) {\n    if (has(\"recort\") || /\\bcorte\\b/.test(t)) return { slug:\"adesivo_recorte\" };\n    if (has(\"impress\", \"digital\")) return { slug:\"adesivo_impresso\" };\n    return { ambiguo:[\"adesivo_recorte\", \"adesivo_impresso\"] };\n  }\n\n  // material de placa personalizada → redireciona ANTES de suporte/poste e das formas\n  // (\"placa de pvc para poste\" e \"placa redonda de acrílico\" são placas personalizadas)\n  if (/(\\bpvc\\b|\\bacm\\b|acril|\\blona\\b|fotolumin)/.test(t)) return { usarPlaca:true };\n\n  if (has(\"suporte\", \"poste\", \"mourao\", \"mourão\")) {\n    if (has(\"madeira\")) return { slug:\"suporte_madeira_3m\" };\n    if (has(\"aco\", \"aço\", \"tubo\", \"metal\", \"ferro\", \"galvaniz\")) return { slug:\"suporte_tubo_aco_3m\" };\n    return { ambiguo:[\"suporte_madeira_3m\", \"suporte_tubo_aco_3m\"] };\n  }\n\n  // heurísticas de forma, só sem material definido (placa CONTRAN por descrição)\n  if (has(\"octogonal\")) return { slug:\"placa_transito_r1\" };\n  if (has(\"preferencia\", \"preferência\", \"triangular\")) return { slug:\"placa_transito_r2\" };\n  if (has(\"redonda\", \"proibido estacionar\", \"regulament\")) return { slug:\"placa_transito_r3_a_r40\" };\n\n  // \"aço\" genérico (sem forma CONTRAN) → placa personalizada\n  if (/\\baco\\b/.test(t)) return { usarPlaca:true };\n\n  return null;\n}\n\nfunction calcularPrecoItem({ produto, quantidade = 1, largura, altura }){\n  const res = resolverItem(produto);\n\n  if (res && res.corte) return {\n    ok:false, transferir:true,\n    erro:\"corte especial (laser/router) não é cotado pelo atendimento. Diga ao cliente que um especialista vai preparar esse orçamento e chame a ferramenta 'transferir' (motivo: corte especial).\",\n  };\n  if (res && res.usarPlaca) return {\n    ok:false, usar_placa:true,\n    erro:\"isso é placa personalizada sob medida — use a ferramenta 'calcular_preco_placa' (material, tipo, largura, altura, quantidade), não esta.\",\n  };\n  if (!res) return {\n    ok:false, nao_encontrado:true, transferir:true,\n    erro:`produto fora da tabela (\"${produto}\"). Diga ao cliente, com naturalidade, que esse item quem orça é um especialista da equipe e chame a ferramenta 'transferir' (motivo: produto fora da tabela). NUNCA diga que não trabalhamos com o item.`,\n  };\n  if (res.ambiguo) return {\n    ok:false, ambiguo:true,\n    opcoes: res.ambiguo.map(s => ({ produto:s, nome:CATALOGO[s].nome })),\n    erro:\"produto ambíguo. Pergunte ao cliente qual destas opções ele deseja: \" + res.ambiguo.map(s => CATALOGO[s].nome).join(\" | \"),\n  };\n\n  const item = CATALOGO[res.slug];\n  const qtd  = Math.round(Number(quantidade) || 1);\n  if (!(qtd >= 1)) return { ok:false, erro:\"informe a quantidade (número inteiro a partir de 1).\" };\n\n  const fx = faixaQuantidade(qtd);\n  if (!fx) return {\n    ok:false, transferir:true,\n    erro:`quantidade de ${qtd} unidades passa do limite da tabela (100). Diga ao cliente que volumes assim têm condição especial e chame a ferramenta 'transferir' (motivo: quantidade acima de 100).`,\n  };\n\n  const precoFaixa = item.precos[fx.idx];\n  let unit, extras = {};\n\n  if (item.porM2) {\n    const L = numCm(largura), A = numCm(altura);\n    if (!(L > 0) || !(A > 0)) return { ok:false, erro:`para ${item.nome.toLowerCase()} preciso das medidas. Informe largura e altura em centímetros.` };\n    const areaM2 = (L / 100) * (A / 100);\n    unit = Math.max(round2(areaM2 * precoFaixa), MINIMO_ADESIVO);\n    extras = { largura_cm:L, altura_cm:A, area_m2:+areaM2.toFixed(4), preco_m2:precoFaixa };\n  } else {\n    unit = precoFaixa;\n  }\n\n  const total = round2(unit * qtd);\n  return {\n    ok:true, produto:res.slug, nome:item.nome, quantidade:qtd, faixa:fx.rotulo,\n    unitario:unit, total, valor_unitario:brl(unit), valor_total:brl(total), ...extras,\n  };\n}\n\n// Linhas de características do item para o documento de orçamento\nfunction specsItem(slug, calc){\n  const item = CATALOGO[slug];\n  const linhas = item.specs.slice();\n  if (item.porM2 && calc && calc.largura_cm) {\n    linhas.push(`Dimensões: ${String(calc.altura_cm).replace(\".\", \",\")} x ${String(calc.largura_cm).replace(\".\", \",\")} cm (A x L)`);\n    if (calc.area_m2) linhas.push(`Área: ${String(+calc.area_m2.toFixed(3)).replace(\".\", \",\")} m² por peça`);\n  }\n  return linhas;\n}\n\n// ============================ ENTRADA/SAÍDA DA FERRAMENTA ============================\n// `query` chega como objeto (schema ligado). Trata também string/JSON por segurança.\nlet q = query;\nif (typeof q === \"string\") { try { q = JSON.parse(q); } catch (e) { q = { produto: q }; } }\n\nconst r = calcularPrecoItem({\n  produto: q.produto,\n  quantidade: q.quantidade,\n  largura: q.largura,\n  altura: q.altura,\n});\n\n// As mensagens de erro do motor já orientam a Camila (perguntar, transferir etc.).\nreturn JSON.stringify(r);",
+        "specifyInputSchema": true,
+        "jsonSchemaExample": "{\n  \"produto\": \"adesivo impresso\",\n  \"quantidade\": 10,\n  \"largura\": 100,\n  \"altura\": 50\n}\n"
+      },
+      "id": "6ed888fb-5298-4f92-ab7e-fea35ee29405",
+      "name": "calcular_preco_item",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.3,
+      "position": [
+        2320,
+        3120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────\n// Lista de números conhecidos\n// ─────────────────────────────────────────────────────────────\n// Exemplo: substitua pelos números que você quer tratar de forma especial (equipe, fornecedores, parceiros)\nconst LISTA = [\n  { nome: 'FORNECEDOR EXEMPLO', numero: '+55 11 99999-0001' },\n  { nome: 'PARCEIRO EXEMPLO',   numero: '+55 11 99999-0002' },\n  { nome: null,                 numero: '+55 11 99999-0003' },\n];\n\nconst CC = '55';\nconst onlyDigits = (v) => String(v ?? '').replace(/\\D/g, '');\n\n// Gera as variantes de um número, em ordem: sem 9º dígito -> com 9º dígito\nfunction gerarVariantes(raw) {\n  let d = onlyDigits(raw).replace(/^0+/, '');\n\n  // tira o DDI se vier (55 + DDD + 8|9 dígitos = 12 ou 13)\n  if (d.length > 11 && d.startsWith(CC)) d = d.slice(CC.length);\n\n  const out = [];\n  const add = (v) => { if (v && !out.includes(v)) out.push(v); };\n\n  if (d.length < 10) { add(d); return out; }\n\n  const ddd = d.slice(0, 2);\n  const assinante = d.slice(2);\n\n  if (assinante.length === 9 && assinante.startsWith('9')) {\n    add(CC + ddd + assinante.slice(1)); // 12 dígitos (sem 9º)\n    add(CC + ddd + assinante);          // 13 dígitos (com 9º)\n  } else if (assinante.length === 8) {\n    add(CC + ddd + assinante);          // 12 dígitos\n    // só celular ganha 9º dígito; fixo (2,3,4,5) não\n    if (/^[6-9]/.test(assinante)) add(CC + ddd + '9' + assinante);\n  } else {\n    add(CC + ddd + assinante);\n  }\n\n  return out;\n}\n\n// Índice: cada variante da lista aponta para a entrada original\nconst INDEX = new Map();\nfor (const entrada of LISTA) {\n  for (const v of gerarVariantes(entrada.numero)) {\n    if (!INDEX.has(v)) INDEX.set(v, entrada);\n  }\n}\n\n// ─────────────────────────────────────────────────────────────\n// Execução\n// ─────────────────────────────────────────────────────────────\nconst globalItems = $('global_var').all();\n\nreturn $input.all().map((item, i) => {\n  const src = globalItems[i] ?? globalItems[0];\n  const telefone = src?.json?.telefone_limpo ?? null;\n\n  const variantes = gerarVariantes(telefone);\n\n  let encontrado = null;\n  let varianteQueBateu = null;\n\n  for (const v of variantes) {              // testa sem 9º, depois com 9º\n    if (INDEX.has(v)) {\n      encontrado = INDEX.get(v);\n      varianteQueBateu = v;\n      break;\n    }\n  }\n\n  return {\n    json: {\n      ...item.json,\n      telefone_limpo: telefone,\n      variantes_testadas: variantes,\n      na_lista: Boolean(encontrado),        // <- true / false\n      match_nome: encontrado?.nome ?? null,\n      match_numero: encontrado?.numero ?? null,\n      match_variante: varianteQueBateu,\n    },\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2928,
+        2720
+      ],
+      "id": "5f73e1ef-c209-4d22-9112-d5a64bd82922",
+      "name": "Lista de Números de Exemplo"
+    },
+    {
+      "id": "6bd6fd13-2d31-4177-8362-a1b3d6cc5797",
+      "name": "classificaFromMe",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1872,
+        2128
+      ],
+      "parameters": {
+        "jsCode": "// Decide o que fazer com uma mensagem fromMe (enviada pela empresa).\nconst g = $('global_var').first().json;\n\n// wasSentByApi = true  -> foi a propria IA enviando pela API. Ignora (senao ela se pausaria sozinha).\nif (g.wasSentByApi === true) {\n  return [{ json: { acao: 'ignorar' } }];\n}\n\n// Humano digitou no WhatsApp. Frase de reativacao explicita?\nconst msg = (g.mensagem || '')\n  .toString()\n  .toLowerCase()\n  .replace(/[.!?\\s]+$/, '')\n  .replace(/\\s+/g, ' ')\n  .trim();\n\nconst frasesReativacao = ['até mais', 'atendimento finalizado'];\nif (frasesReativacao.includes(msg)) {\n  return [{ json: { acao: 'reativar' } }];\n}\n\n// Qualquer outra mensagem de humano -> pausa a IA nesta conversa.\nreturn [{ json: { acao: 'pausar' } }];"
+      }
+    },
+    {
+      "id": "6e611e40-b862-4c2f-9e1e-702877960aea",
+      "name": "routerFromMe",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -1680,
+        2128
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "e50150bc-8fb4-4836-913a-ccea2fe4b00c",
+                    "leftValue": "={{ $json.acao }}",
+                    "rightValue": "ignorar",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "ignorar"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "8d8fea25-db23-4aa9-b6f9-075c4d95cab1",
+                    "leftValue": "={{ $json.acao }}",
+                    "rightValue": "reativar",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "reativar"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "7b6aa252-70d1-4d89-bd90-9b73c917ed20",
+                    "leftValue": "={{ $json.acao }}",
+                    "rightValue": "pausar",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "pausar"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "509ad1e3-8b37-41cd-8d9f-12d0fd5826d7",
+      "name": "check3h",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2080,
+        2360
+      ],
+      "parameters": {
+        "jsCode": "// Cliente em HUMANO voltou a mandar mensagem. Reativa a IA se a pausa ja passou de 3h.\nconst row = $('findClient').all()[0]?.json || {};\nconst pausadoEm = row.pausado_em;\n\nlet reativar = true; // sem pausado_em (registros presos antigos) -> reativa no primeiro retorno\nif (pausadoEm) {\n  const ms = Date.now() - new Date(pausadoEm).getTime();\n  reativar = Number.isFinite(ms) ? (ms >= 3 * 60 * 60 * 1000) : true;\n}\n\nreturn [{ json: { reativar_3h: reativar, remoteJid: row.remoteJid ?? null } }];"
+      }
+    },
+    {
+      "id": "bf(11) 99999-0000-4622-ad4a-a4dd7fe1c173",
+      "name": "reativar3h?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1900,
+        2360
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "fd99e241-8f4f-469b-8899-da2e6193b5df",
+              "leftValue": "={{ $json.reativar_3h }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "252d2f1f-f777-41d7-8083-40ff66e52418",
+      "name": "reativa_encerrado_3h",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1720,
+        2360
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      },
+      "parameters": {
+        "operation": "update",
+        "tableId": "followup",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteID",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "encerrado",
+              "fieldValue": "FALSE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "21bcf21e-25af-44ce-9325-6232ee28411c",
+      "name": "reativa_status_3h",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1540,
+        2360
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      },
+      "parameters": {
+        "operation": "update",
+        "tableId": "chats_new",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteJid",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "I.A"
+            },
+            {
+              "fieldId": "transferido",
+              "fieldValue": "FALSE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "51f85500-faf7-40a4-b4dc-89b1fd7d3e8e",
+      "name": "buscaContatoPausa",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1500,
+        2128
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      },
+      "alwaysOutputData": true,
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "chats_new",
+        "limit": 1,
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteJid",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('global_var').first().json.responsavel }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "3e6daa83-8d40-4594-ae2a-4cdae6688cea",
+      "name": "contatoExistePausa?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1320,
+        2128
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "78cba96e-4cb5-40cf-9413-6bd62496e7b0",
+              "leftValue": "={{ $('buscaContatoPausa').first().json.remoteJid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "8435c619-ab3e-4e10-ace3-af734b041ba6",
+      "name": "criaChatHumano",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1160,
+        2280
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "tableId": "chats_new",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "remoteJid",
+              "fieldValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "HUMANO"
+            },
+            {
+              "fieldId": "pausado_em",
+              "fieldValue": "={{ $now }}"
+            },
+            {
+              "fieldId": "transferido",
+              "fieldValue": "FALSE"
+            },
+            {
+              "fieldId": "cliente",
+              "fieldValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "fieldId": "responsavel",
+              "fieldValue": "={{ $('global_var').first().json.responsavel }}"
+            },
+            {
+              "fieldId": "name",
+              "fieldValue": "={{ $('global_var').first().json.pushname }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "0b8b0a4c-94fc-4202-821d-9472aeac5b01",
+      "name": "criaFollowupHumano",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -1000,
+        2280
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "tableId": "followup",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "remoteID",
+              "fieldValue": "={{ $('global_var').first().json.telefone }}"
+            },
+            {
+              "fieldId": "encerrado",
+              "fieldValue": "TRUE"
+            },
+            {
+              "fieldId": "ultimaAtividade",
+              "fieldValue": "={{ $now }}"
+            },
+            {
+              "fieldId": "ultimaMensagem",
+              "fieldValue": "={{ $('global_var').first().json.mensagem }}"
+            },
+            {
+              "fieldId": "cliente",
+              "fieldValue": "={{ $('global_var').first().json.cliente }}"
+            },
+            {
+              "fieldId": "responsavel",
+              "fieldValue": "={{ $('global_var').first().json.responsavel }}"
+            },
+            {
+              "fieldId": "name",
+              "fieldValue": "={{ $('global_var').first().json.pushname }}"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "connections": {
+    "OpenRouter Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Chat Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calcular_preco_placa": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "gerar_orcamento_pdf": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Limit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "routerSendType",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crypto": {
+      "main": [
+        [
+          {
+            "node": "newChat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "getMessage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tag": {
+      "main": [
+        [
+          {
+            "node": "EventType",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fromMe": {
+      "main": [
+        [
+          {
+            "node": "classificaFromMe",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "findClient",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "statusHumano": {
+      "main": [
+        [
+          {
+            "node": "encerradoTrue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "encerradoFalse": {
+      "main": [
+        [
+          {
+            "node": "statusI.A",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "findClient": {
+      "main": [
+        [
+          {
+            "node": "isClient",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "isClient": {
+      "main": [
+        [
+          {
+            "node": "isStatusI.A",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Crypto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "isStatusI.A": {
+      "main": [
+        [
+          {
+            "node": "updateLastInteraction",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "check3h",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "updateLastInteraction": {
+      "main": [
+        [
+          {
+            "node": "routerMessageType",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "newChat": {
+      "main": [
+        [
+          {
+            "node": "Wait1s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "newFollowup": {
+      "main": [
+        [
+          {
+            "node": "routerMessageType",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait1s": {
+      "main": [
+        [
+          {
+            "node": "newFollowup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "routerMessageType": {
+      "main": [
+        [
+          {
+            "node": "getMessage",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "audioFile/Transcribe",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "file/Base64",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "imageFile/Base64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "audioFile/Transcribe": {
+      "main": [
+        [
+          {
+            "node": "getMessage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "imageFile/Base64": {
+      "main": [
+        [
+          {
+            "node": "imgFile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "imgFile": {
+      "main": [
+        [
+          {
+            "node": "transcripImage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "docFile": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "file/Base64": {
+      "main": [
+        [
+          {
+            "node": "docFile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "transcripImage": {
+      "main": [
+        [
+          {
+            "node": "getMessage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "getMessage": {
+      "main": [
+        [
+          {
+            "node": "pushRedis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait8s": {
+      "main": [
+        [
+          {
+            "node": "getRedis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "split\\n\\n": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pushRedis": {
+      "main": [
+        [
+          {
+            "node": "Wait8s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "getRedis": {
+      "main": [
+        [
+          {
+            "node": "messageCheck",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "messageCheck": {
+      "main": [
+        [
+          {
+            "node": "setMessage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "setMessage": {
+      "main": [
+        [
+          {
+            "node": "deleteRedis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "deleteRedis": {
+      "main": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "routerSendType": {
+      "main": [
+        [
+          {
+            "node": "setType",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "setType",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "setType",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "text": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fileSender": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "setType": {
+      "main": [
+        [
+          {
+            "node": "fileSender",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "global_var": {
+      "main": [
+        [
+          {
+            "node": "tag",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "delay": {
+      "main": [
+        [
+          {
+            "node": "text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EventType": {
+      "main": [
+        [
+          {
+            "node": "getLabels",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Lista de Números de Exemplo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "getLabels": {
+      "main": [
+        [
+          {
+            "node": "isStopped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "isStopped": {
+      "main": [
+        [
+          {
+            "node": "routerStopped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "remoteID": {
+      "main": [
+        [],
+        [
+          {
+            "node": "newChat+Humano",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tag_encerradoTrue": {
+      "main": [
+        [
+          {
+            "node": "remoteID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tag_statusHumano": {
+      "main": [
+        [
+          {
+            "node": "tag_encerradoTrue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "newChat+Humano": {
+      "main": [
+        [
+          {
+            "node": "newFollow+Encerrado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tag_statusI.A": {
+      "main": [
+        [
+          {
+            "node": "tag_encerradoFalse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "routerStopped": {
+      "main": [
+        [
+          {
+            "node": "tag_statusHumano",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [],
+        [
+          {
+            "node": "tag_statusI.A",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent1": {
+      "main": [
+        [
+          {
+            "node": "split\\n\\n",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook1": {
+      "main": [
+        [],
+        [
+          {
+            "node": "global_var",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "transferir": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "fromMe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calcular_preco_item": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lista de Números de Exemplo": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "classificaFromMe": {
+      "main": [
+        [
+          {
+            "node": "routerFromMe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "routerFromMe": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "encerradoFalse",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "buscaContatoPausa",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "check3h": {
+      "main": [
+        [
+          {
+            "node": "reativar3h?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "reativar3h?": {
+      "main": [
+        [
+          {
+            "node": "reativa_encerrado_3h",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "reativa_encerrado_3h": {
+      "main": [
+        [
+          {
+            "node": "reativa_status_3h",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "reativa_status_3h": {
+      "main": [
+        [
+          {
+            "node": "updateLastInteraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "buscaContatoPausa": {
+      "main": [
+        [
+          {
+            "node": "contatoExistePausa?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "contatoExistePausa?": {
+      "main": [
+        [
+          {
+            "node": "statusHumano",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "criaChatHumano",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "criaChatHumano": {
+      "main": [
+        [
+          {
+            "node": "criaFollowupHumano",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "active": false,
+  "tags": []
+}

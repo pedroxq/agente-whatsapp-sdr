@@ -1,0 +1,299 @@
+{
+  "name": "transferencia",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "followup",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteID",
+              "condition": "eq",
+              "keyValue": "={{ $('Webhook').first().json.body.remoteJid }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('Webhook').first().json.body.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('Webhook').first().json.body.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "encerrado",
+              "fieldValue": "TRUE"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        600,
+        0
+      ],
+      "id": "26ad1649-500d-4044-bb13-47fba111ec28",
+      "name": "EncerraFUP",
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "chats_new",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteJid",
+              "condition": "eq",
+              "keyValue": "={{ $('Webhook').first().json.body.remoteJid }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('Webhook').first().json.body.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('Webhook').first().json.body.responsavel }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "transferido",
+              "fieldValue": "TRUE"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "HUMANO"
+            },
+            {
+              "fieldId": "resumo",
+              "fieldValue": "={{ $('Webhook').first().json.body.resumo || '' }}"
+            },
+            {
+              "fieldId": "crmID",
+              "fieldValue": "Qualificado"
+            },
+            {
+              "fieldId": "pausado_em",
+              "fieldValue": "={{ $now }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        400,
+        0
+      ],
+      "id": "e1702371-e812-4799-ac48-e0c5f8ccc6a8",
+      "name": "PausaIA",
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "transferencia",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "09a43efa-b52b-42ca-801a-0001933d9bcf",
+      "name": "Webhook"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "chats_new",
+        "limit": 1,
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "remoteJid",
+              "condition": "eq",
+              "keyValue": "={{ $('Webhook').first().json.body.remoteJid }}"
+            },
+            {
+              "keyName": "cliente",
+              "condition": "eq",
+              "keyValue": "={{ $('Webhook').first().json.body.cliente }}"
+            },
+            {
+              "keyName": "responsavel",
+              "condition": "eq",
+              "keyValue": "={{ $('Webhook').first().json.body.responsavel }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        200,
+        0
+      ],
+      "id": "f4c9337d-7d61-4176-b59c-d90ea5bf6774",
+      "name": "buscaChat",
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "Certinho! Já vou te conectar com nosso consultor",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        800,
+        0
+      ],
+      "id": "f4f7ed89-7ec3-444e-b483-4e56fbb2ae2f",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Webhook').first().json.body.url }}/send/text",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "token",
+              "value": "={{ $('Webhook').first().json.body['apikey-cliente'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "number",
+              "value": "=120363000000000000@g.us"
+            },
+            {
+              "name": "text",
+              "value": "=Transferência para atendente\n\nNome: {{ $('buscaChat').first().json?.name || 'sem nome' }}\n\nTelefone: https://wa.me/{{ $('Webhook').first().json.body.remoteJid.replace(/\\D/g, '') }}\n\nMotivo: {{ $('Webhook').first().json.body.motivo || 'não informado' }}\n\nResumo: {{ $('Webhook').first().json.body.resumo || 'não informado' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1000,
+        0
+      ],
+      "id": "f833c849-00ed-4ff6-a905-50a6eb2efa07",
+      "name": "notificaGrupo",
+      "onError": "continueRegularOutput",
+      "disabled": false
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "buscaChat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "buscaChat": {
+      "main": [
+        [
+          {
+            "node": "PausaIA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PausaIA": {
+      "main": [
+        [
+          {
+            "node": "EncerraFUP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EncerraFUP": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Webhook": {
+      "main": [
+        [
+          {
+            "node": "notificaGrupo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "active": false,
+  "tags": []
+}

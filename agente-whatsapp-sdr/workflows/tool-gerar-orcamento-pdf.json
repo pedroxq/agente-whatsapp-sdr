@@ -1,0 +1,456 @@
+{
+  "name": "Tool: Gerar Orçamento PDF",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Tool: Gerar Orçamento PDF\n\n**O que faz:** recebe TODOS os itens de uma vez, recalcula os preços com a MESMA tabela da ferramenta `calcular_preco_placa`, monta o HTML da proposta (layout do orçamento oficial), converte em PDF, sobe no Google Drive e devolve `{ ok, link, numero_proposta, valor_total, prazo_producao }` para a Camila enviar ao cliente.\n\n**Configurar antes de ativar:**\n1. **HTML → PDF**: o node usa Gotenberg (`http://gotenberg:3000`). Ajuste a URL para a sua instância — ou troque por uma API de conversão (PDFShift, ConvertAPI, APITemplate.io etc.), mantendo a resposta como *File* no campo binário `data`.\n2. **Google Drive**: selecione a credencial e a pasta de destino nos 2 nodes do Drive.\n3. **Tabela de preços**: está duplicada no Code node (igual à `calcular_preco_placa`). Se atualizar os preços lá, atualize aqui também.",
+        "height": 320,
+        "width": 900,
+        "color": 5
+      },
+      "id": "a4c32909-fd12-4a3a-a8e2-2643ccc184b8",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "cliente_nome"
+            },
+            {
+              "name": "cliente_documento"
+            },
+            {
+              "name": "cliente_telefone"
+            },
+            {
+              "name": "itens",
+              "type": "array"
+            },
+            {
+              "name": "observacoes"
+            }
+          ]
+        }
+      },
+      "id": "cf94beba-52fc-4160-9c19-91c9a6659c04",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        80,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/* ============================================================================\n   CODE NODE — \"Montar orçamento (HTML)\"  |  Subfluxo: Gerar Orçamento PDF\n   Modo: Run Once for All Items\n   *** ATENÇÃO: esta tabela de preços existe nos 3 nodes de preço (placa, item e orçamento PDF). Ao alterar valores, atualize os três. ***\n\n   Entrada (do Execute Workflow Trigger, \"Define Below\"):\n     cliente_nome      string\n     cliente_documento string (opcional — CPF ou CNPJ)\n     cliente_telefone  string (opcional)\n     itens             array — cada item tem UMA das duas formas:\n       PLACA personalizada: { descricao, material, tipo, largura, altura,\n                              quantidade, placa_endereco }\n                              (PVC: material DEVE incluir a espessura, ex. \"PVC 2mm\")\n       ITEM de catálogo:    { produto: \"<slug da tabela 2026>\", quantidade,\n                              descricao?, largura?, altura? (só adesivos) }\n     observacoes       string (opcional)\n\n   Saída ok:  json { ok:true, numero_proposta, fileName, total, valor_total,\n                     qtd_itens, resumo }\n              binary.arquivo_html (index.html pronto para o conversor de PDF)\n   Saída erro: json { ok:false, erro }\n============================================================================ */\n\n// ─────────────────────────── PLACAS PERSONALIZADAS ───────────────────────────\n// Preço/m² de referência (faixa \"100\") por material+acabamento; ±5% por faixa\n// de tamanho pelo MAIOR lado; mínimos por material; limite de chapa.\nconst TAXA = 0.05;\nconst FAIXAS = [\n  [0, 4], [30, 3], [40, 2], [60, 1], [100, 0], [130, -1], [170, -2],\n];\nconst MATERIAIS = {\n  \"PVC\":           { nome:\"PVC\",           desc:\"chapa de PVC expandido\",              banda:\"larga\",    min:25, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":550,  \"Refletiva\":880,  \"Fotoluminescente\":880,  \"Impressao UV\":550 } },\n  \"ACM\":           { nome:\"ACM\",           desc:\"chapa de ACM\",                        banda:\"larga\",    min:25, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":700,  \"Refletiva\":1040,  \"Fotoluminescente\":1040,  \"Impressao UV\":700 } },\n  \"Aco\":           { nome:\"Aço\",           desc:\"chapa de aço, pintura eletrostática\", banda:\"larga\",    min:40, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":710,  \"Refletiva\":710,  \"Fotoluminescente\":710,  \"Impressao UV\":710 } },\n  \"Acrilico 2mm\":  { nome:\"Acrílico 2mm\",  desc:\"acrílico 2 mm\",                       banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":970,  \"Refletiva\":970,  \"Fotoluminescente\":970,  \"Impressao UV\":970 } },\n  \"Acrilico 3mm\":  { nome:\"Acrílico 3mm\",  desc:\"acrílico 3 mm\",                       banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":1170,  \"Refletiva\":1170,  \"Fotoluminescente\":1170,  \"Impressao UV\":1170 } },\n  \"Acrilico 4mm\":  { nome:\"Acrílico 4mm\",  desc:\"acrílico 4 mm\",                       banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":1040,  \"Refletiva\":1040,  \"Fotoluminescente\":1040,  \"Impressao UV\":1040 } },\n  \"Acrilico 5mm\":  { nome:\"Acrílico 5mm\",  desc:\"acrílico 5 mm\",                       banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":1340, \"Refletiva\":1340, \"Fotoluminescente\":1340, \"Impressao UV\":1340 } },\n  \"Acrilico 10mm\": { nome:\"Acrílico 10mm\", desc:\"acrílico 10 mm\",                      banda:\"estreita\", min:50, minPlacaEnd:100, largMax:122, altMax:244,\n                     tipos:{ \"Normal\":1680, \"Refletiva\":1680, \"Fotoluminescente\":1680, \"Impressao UV\":1680 } },\n  \"Lona\":          { nome:\"Lona\",          desc:\"lona\",                                banda:\"fixa\",     min:95, minPlacaEnd:100, largMax:320, altMax:5000,\n                     tipos:{ \"Normal\":370,  \"Refletiva\":370,  \"Fotoluminescente\":370,  \"Impressao UV\":370 } },\n};\nconst TIPO_NOME = { \"Normal\":\"Normal\", \"Refletiva\":\"Refletiva\", \"Fotoluminescente\":\"Fotoluminescente\", \"Impressao UV\":\"Impressão UV\" };\n\n// ─────────────────────────── ITENS DE CATÁLOGO (Tabela 2026) ───────────────────────────\n// Preço UNITÁRIO por faixa de QUANTIDADE (limites inclusivos). Valores FICTÍCIOS de exemplo (demo): substitua pela sua própria tabela de preços.\n// célula a célula do PDF oficial — NÃO derivar por fórmula, NÃO \"corrigir\" anomalias.\n// porM2: preço é por m² (exige largura×altura), mínimo R$ 15,00 por peça.\nconst FAIXAS_QTD = [\n  { min: 1,  max: 1,   rotulo: \"1\"      },\n  { min: 2,  max: 5,   rotulo: \"2-5\"    },\n  { min: 6,  max: 10,  rotulo: \"6-10\"   },\n  { min: 11, max: 20,  rotulo: \"11-20\"  },\n  { min: 21, max: 40,  rotulo: \"21-40\"  },\n  { min: 41, max: 50,  rotulo: \"41-50\"  },\n  { min: 51, max: 100, rotulo: \"51-100\" },\n];\nconst QTD_MAX_ITEM = 100;\nconst MINIMO_ADESIVO = 15;\n\nconst CATALOGO = {\n  \"abracadeira_40cm\": {\n    nome: \"Abraçadeira de 40 cm\",\n    specs: [\"Abraçadeira para fixação de placa em poste\", \"Tamanho: 40 cm\"],\n    precos: [75.90, 74.39, 72.87, 71.35, 68.43, 68.31, 66.80],\n  },\n  \"abracadeira_50cm\": {\n    nome: \"Abraçadeira de 50 cm\",\n    specs: [\"Abraçadeira para fixação de placa em poste\", \"Tamanho: 50 cm\"],\n    precos: [75.51, 74.00, 72.49, 70.98, 68.08, 67.96, 66.45],\n  },\n  \"adesivo_recorte\": {\n    nome: \"Adesivo de recorte\", porM2: true,\n    specs: [\"Adesivo vinil de recorte\", \"Valor por m²\"],\n    precos: [225.96, 221.45, 216.93, 212.41, 203.73, 203.37, 198.85],\n  },\n  \"adesivo_impresso\": {\n    nome: \"Adesivo impresso\", porM2: true,\n    specs: [\"Adesivo vinil impresso\", \"Valor por m²\"],\n    precos: [271.49, 266.06, 260.63, 255.20, 244.77, 244.34, 238.91],\n  },\n  \"bate_rodas\": {\n    nome: \"Bate-rodas em resina\",\n    specs: [\"Bate-rodas em resina\", \"Dimensões: 49 × 17 × 8,5 cm\"],\n    precos: [127.92, 125.36, 122.80, 120.24, 115.33, 115.13, 112.57],\n  },\n  \"cone_balizador_118cm\": {\n    nome: \"Cone balizador laranja com faixa refletiva, 118 cm\",\n    specs: [\"Cone balizador laranja com faixas refletivas (94 mm)\", \"Altura: 118 cm · base 40 cm\"],\n    precos: [204.56, 200.47, 196.38, 192.29, 184.43, 184.10, 180.01],\n  },\n  \"cone_flexivel_75cm\": {\n    nome: \"Cone de PVC flexível 75 cm (NBR 15.071)\",\n    specs: [\"Cone para sinalização viária em PVC flexível\", \"Duas faixas refletivas brancas tipo colmeia\", \"Altura: 75 cm · peso 3 a 4 kg · atende NBR 15.071\"],\n    precos: [115.85, 113.53, 111.22, 108.90, 104.45, 104.27, 101.95],\n  },\n  \"cone_rigido_75cm\": {\n    nome: \"Cone de PVC rígido 75 cm\",\n    specs: [\"Cone para sinalização viária em PVC rígido\", \"Duas faixas refletivas brancas tipo colmeia\", \"Altura: 75 cm\"],\n    precos: [49.97, 48.98, 47.98, 46.98, 45.06, 44.98, 43.98],\n  },\n  \"corrente_pedestal_grande\": {\n    nome: \"Corrente para pedestal — grande\",\n    specs: [\"Corrente plástica para pedestal\", \"Tamanho grande\"],\n    precos: [10.38, 10.18, 9.97, 9.76, 9.36, 9.34, 9.14],\n  },\n  \"corrente_pedestal_pequena\": {\n    nome: \"Corrente para pedestal — pequena\",\n    specs: [\"Corrente plástica para pedestal\", \"Tamanho pequeno\"],\n    precos: [6.95, 6.82, 6.68, 6.54, 6.27, 6.26, 6.12],\n  },\n  \"pedestal_zebrado\": {\n    nome: \"Pedestal zebrado com placa 30×40 cm personalizada\",\n    specs: [\"Pedestal zebrado\", \"Placa 30 × 40 cm personalizada inclusa\"],\n    precos: [160.26, 152.24, 147.44, 141.03, 130.93, 136.22, 128.20],\n  },\n  \"placa_aco_50x50_refletiva\": {\n    nome: \"Placa de aço 50×50 cm com adesivo refletivo\",\n    specs: [\"Chapa de aço galvanizada nº 18 (1,25 mm), pintura eletrostática\", \"Revestimento em adesivo refletivo\", \"Dimensões: 50 × 50 cm — sem instalação\"],\n    precos: [270.11, 256.60, 248.50, 237.69, 220.68, 229.59, 216.08],\n  },\n  \"placa_transito_r1\": {\n    nome: \"Placa de trânsito R-1 (PARE) octogonal 60×60 cm\",\n    specs: [\"Chapa de aço galvanizada nº 18 (1,25 mm), pintura eletrostática\", \"Adesivo vinil refletivo (5 anos), padrão CONTRAN\", \"Octogonal 60 × 60 cm — sem instalação\"],\n    precos: [423.74, 415.27, 406.79, 398.32, 382.04, 381.37, 372.89],\n  },\n  \"placa_transito_r2\": {\n    nome: \"Placa de trânsito R-2 triangular 75×75×75 cm\",\n    specs: [\"Chapa de aço galvanizada nº 18 (1,25 mm), pintura eletrostática\", \"Adesivo vinil refletivo importado (5 anos), padrão CONTRAN\", \"Triangular 75 × 75 × 75 cm — sem instalação\"],\n    precos: [534.77, 508.03, 491.99, 470.60, 436.91, 454.55, 427.82],\n  },\n  \"placa_transito_r3_a_r40\": {\n    nome: \"Placa de trânsito R-3 a R-40 redonda ⌀50 cm\",\n    specs: [\"Chapa de aço galvanizada nº 18 (1,25 mm), pintura eletrostática\", \"Adesivo vinil refletivo importado (7 anos), padrão CONTRAN\", \"Redonda ⌀ 50 cm · verso preto fosco — sem instalação\"],\n    precos: [225.64, 221.13, 216.61, 212.10, 203.44, 203.08, 198.56],\n  },\n  \"suporte_madeira_3m\": {\n    nome: \"Suporte para placa em madeira, 3 metros\",\n    specs: [\"Suporte para placa em madeira\", \"Comprimento: 3 metros\"],\n    precos: [126.48, 123.95, 121.42, 118.89, 114.03, 113.83, 111.30],\n  },\n  \"suporte_tubo_aco_3m\": {\n    nome: \"Suporte para placa em tubo de aço 2,5\\\", 3 metros\",\n    specs: [\"Suporte para placa em tubo de aço 2,5\\\"\", \"Comprimento: 3 metros\"],\n    precos: [278.93, 273.35, 267.77, 262.19, 251.48, 251.03, 245.45],\n  },\n  \"tachao_com_instalacao\": {\n    nome: \"Tachão birefletivo — com instalação\",\n    specs: [\"Tachão birefletivo em resina, trapezoidal\", \"Dimensões: 25 × 15 × 5 cm\", \"Com instalação\"],\n    precos: [135.24, 132.54, 129.83, 127.13, 121.94, 121.72, 119.01],\n  },\n  \"tachao_sem_instalacao\": {\n    nome: \"Tachão birefletivo — sem instalação\",\n    specs: [\"Tachão birefletivo em resina, trapezoidal\", \"Dimensões: 25 × 15 × 5 cm\", \"Sem instalação\"],\n    precos: [58.91, 57.73, 56.55, 55.38, 53.12, 53.02, 51.84],\n  },\n  \"tachinha_com_instalacao\": {\n    nome: \"Tachinha refletiva amarela — com instalação\",\n    specs: [\"Tachinha refletiva em resina, monodirecional\", \"Cor amarela\", \"Com instalação\"],\n    precos: [87.79, 86.04, 84.28, 82.53, 79.15, 79.02, 77.26],\n  },\n  \"tachinha_sem_instalacao\": {\n    nome: \"Tachinha refletiva amarela — sem instalação\",\n    specs: [\"Tachinha refletiva em resina, monodirecional\", \"Cor amarela\", \"Sem instalação\"],\n    precos: [63.31, 62.05, 60.78, 59.51, 57.08, 56.98, 55.72],\n  },\n  \"cavalete_dupla_face\": {\n    nome: \"Cavalete dupla face amarelo\",\n    specs: [\"Cavalete de sinalização dupla face\", \"Cor amarela\"],\n    precos: [91.07, 86.51, 83.78, 80.14, 74.41, 77.41, 72.85],\n  },\n  \"fita_zebrada\": {\n    nome: \"Fita zebrada\",\n    specs: [\"Fita zebrada para isolamento de área (rolo)\"],\n    precos: [21.48, 20.40, 19.76, 18.90, 17.55, 18.25, 17.18],\n  },\n  \"fita_amarela_vermelha\": {\n    nome: \"Fita amarela/vermelha\",\n    specs: [\"Fita amarela/vermelha para isolamento de área (rolo)\"],\n    precos: [28.99, 27.54, 26.67, 25.51, 23.69, 24.64, 23.19],\n  },\n};\n\n// ─────────────────────────── HELPERS ───────────────────────────\nconst norm = s => String(s ?? \"\").normalize(\"NFD\").replace(/[̀-ͯ]/g, \"\").toLowerCase().trim();\n\n// formata em reais SEM depender de Intl (seguro no sandbox da ferramenta)\nfunction brl(v){\n  const [i, d] = Number(v).toFixed(2).split(\".\");\n  return \"R$ \" + i.replace(/\\B(?=(\\d{3})+(?!\\d))/g, \".\") + \",\" + d;\n}\nfunction round2(v){ return Math.round((v + Number.EPSILON) * 100) / 100; }\nfunction numCm(v){\n  if (typeof v === \"number\") return v;\n  const s = String(v).toLowerCase().replace(\",\", \".\");\n  const n = parseFloat(s.replace(/[^0-9.]/g, \"\"));\n  if (isNaN(n)) return NaN;\n  if (/m\\s*$/.test(s) && !/[cm]m\\s*$/.test(s)) return n * 100; // sufixo \"m\" isolado = metros: \"1,5m\" -> 150\n  return n;\n}\n\n// ─────────────────────────── CÁLCULO DE PLACAS ───────────────────────────\nfunction acharMaterial(txt){\n  const t = norm(txt);\n  if (t.includes(\"pvc\")) return \"PVC\";\n  if (t.includes(\"acm\")) return \"ACM\";\n  if (t.includes(\"acril\")) {\n    const mm  = (t.match(/(\\d+)\\s*mm/) || [])[1];\n    const esp = [\"2\",\"3\",\"4\",\"5\",\"10\"].includes(mm) ? mm : \"2\"; // sem espessura => 2mm\n    return \"Acrilico \" + esp + \"mm\";\n  }\n  if (t.includes(\"lona\")) return \"Lona\";\n  if (t.includes(\"aco\") || t.includes(\"metal\")) return \"Aco\";\n  return null;\n}\nfunction acharTipo(txt){\n  const t = norm(txt);\n  if (t.includes(\"reflet\")) return \"Refletiva\";\n  if (t.includes(\"foto\") || t.includes(\"luminescente\")) return \"Fotoluminescente\";\n  if (t.includes(\"uv\") || t.includes(\"impress\")) return \"Impressao UV\";\n  return \"Normal\";\n}\nfunction faixaExpoente(maior, banda){\n  let b = 4;\n  for (const [lim, exp] of FAIXAS) if (maior >= lim) b = exp;\n  if (banda === \"estreita\" && b < -1) b = -1; // acrílicos param na faixa -1\n  return b;\n}\nfunction valorM2(refM2, maior, banda){\n  if (banda === \"fixa\") return refM2; // Lona: m² fixo\n  const b = faixaExpoente(maior, banda);\n  return b >= 0 ? refM2 * Math.pow(1 + TAXA, b) : refM2 * Math.pow(1 - TAXA, -b);\n}\n\n// opts.exigirEspessuraPvc: true no documento de orçamento (a espessura precisa constar)\nfunction calcularPrecoPlaca({ material, tipo, largura, altura, quantidade = 1, placaEndereco = false }, opts){\n  opts = opts || {};\n  const mat = acharMaterial(material);\n  if (!mat) return { ok:false, erro:`material não reconhecido (\"${material}\"). Use PVC, ACM, Aço, Acrílico (2/3/4/5/10 mm) ou Lona.` };\n  const cfg   = MATERIAIS[mat];\n  const tp    = acharTipo(tipo);\n  const refM2 = cfg.tipos[tp];\n\n  // PVC: se a espessura veio no texto, ela entra no nome; no documento é obrigatória\n  let nomeMat = cfg.nome, descMat = cfg.desc;\n  if (mat === \"PVC\") {\n    const espPvc = (norm(material).match(/(\\d+)\\s*mm/) || [])[1];\n    if (espPvc) { nomeMat = `PVC ${espPvc}mm`; descMat = `chapa de PVC ${espPvc}mm`; }\n    else if (opts.exigirEspessuraPvc) return { ok:false, erro:'informe a espessura do PVC no material (ex.: \"PVC 2mm\").' };\n  }\n\n  const L = numCm(largura), A = numCm(altura);\n  if (!(L > 0) || !(A > 0)) return { ok:false, erro:\"faltam as medidas. Informe largura e altura em centímetros.\" };\n\n  const qtd    = Math.max(1, Math.round(Number(quantidade) || 1));\n  const maior  = Math.max(L, A), menor = Math.min(L, A);\n  const m2     = valorM2(refM2, maior, cfg.banda);\n  const areaM2 = (L / 100) * (A / 100);\n  const calc   = Math.round(areaM2 * m2);\n  const minimo = placaEndereco ? cfg.minPlacaEnd : cfg.min;\n  const unit   = Math.max(calc, minimo);\n  const total  = unit * qtd;\n  const cabe   = menor <= Math.min(cfg.largMax, cfg.altMax) && maior <= Math.max(cfg.largMax, cfg.altMax);\n\n  return {\n    ok:true, material:nomeMat, materialDesc:descMat, tipo:TIPO_NOME[tp],\n    largura_cm:L, altura_cm:A, quantidade:qtd,\n    faixa: cfg.banda === \"fixa\" ? 0 : faixaExpoente(maior, cfg.banda),\n    preco_m2_aplicado:+m2.toFixed(2),\n    areaM2, unitario:unit, total,\n    valor_unitario:brl(unit), valor_total:brl(total),\n    dentro_do_limite:cabe,\n  };\n}\n\n// ─────────────────────────── CÁLCULO DE ITENS DE CATÁLOGO ───────────────────────────\nfunction faixaQuantidade(qtd){\n  for (let i = 0; i < FAIXAS_QTD.length; i++) {\n    if (qtd >= FAIXAS_QTD[i].min && qtd <= FAIXAS_QTD[i].max) return { idx:i, rotulo:FAIXAS_QTD[i].rotulo };\n  }\n  return null; // acima de 100\n}\n\n// Resolve o texto do cliente/agente para um item do catálogo.\n// Retorna { slug } | { ambiguo:[slugs] } | { corte:true } | { usarPlaca:true } | null\n// A ORDEM das regras importa (validada por testes): sinais explícitos de placa de\n// trânsito primeiro; depois famílias de itens; depois materiais de placa personalizada\n// (redirect); por último heurísticas de forma (redonda/triangular) e \"aço\" genérico.\nfunction resolverItem(texto){\n  const t = norm(texto).replace(/[_\\-]/g, \" \");\n\n  // slug exato (com _ ou espaço)\n  const slugTry = norm(texto).replace(/\\s+/g, \"_\").replace(/-/g, \"_\");\n  if (CATALOGO[slugTry]) return { slug: slugTry };\n\n  const has = (...ws) => ws.some(w => t.includes(w));\n\n  // corte especial: não cotável. \"\\bcorte\\b\" não captura \"recorte\"; e \"adesivo/vinil\n  // de corte\" é o adesivo de recorte do catálogo, não corte especial.\n  if (!has(\"adesivo\", \"vinil\") && /(\\bcorte\\b|\\blaser\\b|\\brouter\\b|\\bcnc\\b)/.test(t)) return { corte:true };\n\n  // placas de trânsito CONTRAN — sinais EXPLÍCITOS (antes de tudo, para \"placa de\n  // pare com suporte\" não virar suporte)\n  if (/\\bpare\\b/.test(t) || /\\br\\s*[- ]?1\\b/.test(t)) return { slug:\"placa_transito_r1\" };\n  if (/\\br\\s*[- ]?2\\b/.test(t)) return { slug:\"placa_transito_r2\" };\n  if (/\\br\\s*[- ]?([3-9]|[1-3][0-9]|40)\\b/.test(t)) return { slug:\"placa_transito_r3_a_r40\" };\n  if (has(\"50x50\", \"50 x 50\") && has(\"aco\", \"aço\")) return { slug:\"placa_aco_50x50_refletiva\" };\n\n  // famílias de itens do catálogo\n  if (has(\"abracadeira\", \"abraçadeira\")) {\n    if (t.includes(\"40\")) return { slug:\"abracadeira_40cm\" };\n    if (t.includes(\"50\")) return { slug:\"abracadeira_50cm\" };\n    return { ambiguo:[\"abracadeira_40cm\", \"abracadeira_50cm\"] };\n  }\n  if (has(\"bate roda\", \"bate-roda\", \"baterroda\", \"baterodas\", \"bate rodas\")) return { slug:\"bate_rodas\" };\n  if (has(\"balizador\")) return { slug:\"cone_balizador_118cm\" };\n  if (has(\"cone\")) {\n    if (has(\"118\")) return { slug:\"cone_balizador_118cm\" };\n    if (has(\"flexivel\", \"flexível\", \"nbr\")) return { slug:\"cone_flexivel_75cm\" };\n    if (has(\"rigido\", \"rígido\")) return { slug:\"cone_rigido_75cm\" };\n    return { ambiguo:[\"cone_flexivel_75cm\", \"cone_rigido_75cm\", \"cone_balizador_118cm\"] };\n  }\n  if (has(\"corrente\")) {\n    if (has(\"grande\")) return { slug:\"corrente_pedestal_grande\" };\n    if (has(\"pequen\")) return { slug:\"corrente_pedestal_pequena\" };\n    return { ambiguo:[\"corrente_pedestal_grande\", \"corrente_pedestal_pequena\"] };\n  }\n  if (has(\"pedestal\")) return { slug:\"pedestal_zebrado\" };\n  if (has(\"tachao\", \"tachoes\")) {\n    if (/sem\\s+instal/.test(t)) return { slug:\"tachao_sem_instalacao\" };\n    if (/com\\s+instal|instalad/.test(t)) return { slug:\"tachao_com_instalacao\" };\n    return { ambiguo:[\"tachao_com_instalacao\", \"tachao_sem_instalacao\"] };\n  }\n  if (/\\btach(a|as|inha|inhas)\\b/.test(t)) {\n    if (/sem\\s+instal/.test(t)) return { slug:\"tachinha_sem_instalacao\" };\n    if (/com\\s+instal|instalad/.test(t)) return { slug:\"tachinha_com_instalacao\" };\n    return { ambiguo:[\"tachinha_com_instalacao\", \"tachinha_sem_instalacao\"] };\n  }\n  if (has(\"cavalete\")) return { slug:\"cavalete_dupla_face\" };\n  if (has(\"fita\")) {\n    if (has(\"zebrad\")) return { slug:\"fita_zebrada\" };\n    if (has(\"amarel\", \"vermelh\")) return { slug:\"fita_amarela_vermelha\" };\n    return { ambiguo:[\"fita_zebrada\", \"fita_amarela_vermelha\"] };\n  }\n  if (has(\"adesivo\", \"vinil\")) {\n    if (has(\"recort\") || /\\bcorte\\b/.test(t)) return { slug:\"adesivo_recorte\" };\n    if (has(\"impress\", \"digital\")) return { slug:\"adesivo_impresso\" };\n    return { ambiguo:[\"adesivo_recorte\", \"adesivo_impresso\"] };\n  }\n\n  // material de placa personalizada → redireciona ANTES de suporte/poste e das formas\n  // (\"placa de pvc para poste\" e \"placa redonda de acrílico\" são placas personalizadas)\n  if (/(\\bpvc\\b|\\bacm\\b|acril|\\blona\\b|fotolumin)/.test(t)) return { usarPlaca:true };\n\n  if (has(\"suporte\", \"poste\", \"mourao\", \"mourão\")) {\n    if (has(\"madeira\")) return { slug:\"suporte_madeira_3m\" };\n    if (has(\"aco\", \"aço\", \"tubo\", \"metal\", \"ferro\", \"galvaniz\")) return { slug:\"suporte_tubo_aco_3m\" };\n    return { ambiguo:[\"suporte_madeira_3m\", \"suporte_tubo_aco_3m\"] };\n  }\n\n  // heurísticas de forma, só sem material definido (placa CONTRAN por descrição)\n  if (has(\"octogonal\")) return { slug:\"placa_transito_r1\" };\n  if (has(\"preferencia\", \"preferência\", \"triangular\")) return { slug:\"placa_transito_r2\" };\n  if (has(\"redonda\", \"proibido estacionar\", \"regulament\")) return { slug:\"placa_transito_r3_a_r40\" };\n\n  // \"aço\" genérico (sem forma CONTRAN) → placa personalizada\n  if (/\\baco\\b/.test(t)) return { usarPlaca:true };\n\n  return null;\n}\n\nfunction calcularPrecoItem({ produto, quantidade = 1, largura, altura }){\n  const res = resolverItem(produto);\n\n  if (res && res.corte) return {\n    ok:false, transferir:true,\n    erro:\"corte especial (laser/router) não é cotado pelo atendimento. Diga ao cliente que um especialista vai preparar esse orçamento e chame a ferramenta 'transferir' (motivo: corte especial).\",\n  };\n  if (res && res.usarPlaca) return {\n    ok:false, usar_placa:true,\n    erro:\"isso é placa personalizada sob medida — use a ferramenta 'calcular_preco_placa' (material, tipo, largura, altura, quantidade), não esta.\",\n  };\n  if (!res) return {\n    ok:false, nao_encontrado:true, transferir:true,\n    erro:`produto fora da tabela (\"${produto}\"). Diga ao cliente, com naturalidade, que esse item quem orça é um especialista da equipe e chame a ferramenta 'transferir' (motivo: produto fora da tabela). NUNCA diga que não trabalhamos com o item.`,\n  };\n  if (res.ambiguo) return {\n    ok:false, ambiguo:true,\n    opcoes: res.ambiguo.map(s => ({ produto:s, nome:CATALOGO[s].nome })),\n    erro:\"produto ambíguo. Pergunte ao cliente qual destas opções ele deseja: \" + res.ambiguo.map(s => CATALOGO[s].nome).join(\" | \"),\n  };\n\n  const item = CATALOGO[res.slug];\n  const qtd  = Math.round(Number(quantidade) || 1);\n  if (!(qtd >= 1)) return { ok:false, erro:\"informe a quantidade (número inteiro a partir de 1).\" };\n\n  const fx = faixaQuantidade(qtd);\n  if (!fx) return {\n    ok:false, transferir:true,\n    erro:`quantidade de ${qtd} unidades passa do limite da tabela (100). Diga ao cliente que volumes assim têm condição especial e chame a ferramenta 'transferir' (motivo: quantidade acima de 100).`,\n  };\n\n  const precoFaixa = item.precos[fx.idx];\n  let unit, extras = {};\n\n  if (item.porM2) {\n    const L = numCm(largura), A = numCm(altura);\n    if (!(L > 0) || !(A > 0)) return { ok:false, erro:`para ${item.nome.toLowerCase()} preciso das medidas. Informe largura e altura em centímetros.` };\n    const areaM2 = (L / 100) * (A / 100);\n    unit = Math.max(round2(areaM2 * precoFaixa), MINIMO_ADESIVO);\n    extras = { largura_cm:L, altura_cm:A, area_m2:+areaM2.toFixed(4), preco_m2:precoFaixa };\n  } else {\n    unit = precoFaixa;\n  }\n\n  const total = round2(unit * qtd);\n  return {\n    ok:true, produto:res.slug, nome:item.nome, quantidade:qtd, faixa:fx.rotulo,\n    unitario:unit, total, valor_unitario:brl(unit), valor_total:brl(total), ...extras,\n  };\n}\n\n// Linhas de características do item para o documento de orçamento\nfunction specsItem(slug, calc){\n  const item = CATALOGO[slug];\n  const linhas = item.specs.slice();\n  if (item.porM2 && calc && calc.largura_cm) {\n    linhas.push(`Dimensões: ${String(calc.altura_cm).replace(\".\", \",\")} x ${String(calc.largura_cm).replace(\".\", \",\")} cm (A x L)`);\n    if (calc.area_m2) linhas.push(`Área: ${String(+calc.area_m2.toFixed(3)).replace(\".\", \",\")} m² por peça`);\n  }\n  return linhas;\n}\n\n// ============================ HELPERS DO ORÇAMENTO ==========================\nconst esc = s => String(s ?? \"\")\n  .replace(/&/g,\"&amp;\").replace(/</g,\"&lt;\").replace(/>/g,\"&gt;\")\n  .replace(/\"/g,\"&quot;\").replace(/'/g,\"&#39;\");\n\n// dimensões exatas, sem arredondar (41.5 -> \"41,5\")\nconst fmtDim = v => String(Number(v)).replace(\".\", \",\");\n\n// Prazo para produção (tabela oficial: pedidos até R$ X -> dias úteis)\nconst PRAZOS = [\n  [100, 2], [200, 3], [1000, 4], [3000, 5], [5000, 7],\n  [10000, 8], [20000, 10], [30000, 12],\n];\nfunction prazoProducao(total){\n  for (const [limite, dias] of PRAZOS) {\n    if (total <= limite) return `até ${dias} dias úteis`;\n  }\n  return \"a combinar com o atendente\";\n}\n\n// ============================ IMAGENS DO TIMBRADO ===========================\n// Data URIs das imagens do timbrado (opcional). Se ficarem vazios, o documento sai com timbrado em texto.\nconst IMG_HEADER = \"\";      // faixa timbrada do topo (repete em toda página)\nconst IMG_FOOTER = \"\";      // faixa de contato do rodapé (repete em toda página)\nconst IMG_ASSINATURA = \"\";  // assinatura do sócio (fim do documento)\n\n// ============================ ENTRADA =======================================\nconst entrada = $input.first().json;\n\nlet itens = entrada.itens;\nif (typeof itens === \"string\") { try { itens = JSON.parse(itens); } catch (e) { itens = null; } }\nif (itens && !Array.isArray(itens) && typeof itens === \"object\") {\n  // agente pode mandar { itens: [...] } embrulhado\n  if (Array.isArray(itens.itens)) itens = itens.itens;\n  else itens = [itens]; // ou um item único como objeto\n}\nif (!Array.isArray(itens) || itens.length === 0) {\n  return [{ json: { ok:false, erro:\"nenhum item recebido. Envie 'itens' como uma lista: placas com material/tipo/medidas/quantidade e itens de catálogo com produto/quantidade.\" } }];\n}\n\nconst clienteNome = String(entrada.cliente_nome || \"\").trim();\nif (!clienteNome) {\n  return [{ json: { ok:false, erro:\"faltou o nome do cliente (cliente_nome).\" } }];\n}\nconst clienteTelefone  = String(entrada.cliente_telefone  || \"\").trim();\nconst clienteDocumento = String(entrada.cliente_documento || \"\").trim(); // CPF/CNPJ (opcional)\nconst observacoesExtra = String(entrada.observacoes       || \"\").trim();\n\n// ============================ CÁLCULO DOS ITENS =============================\nconst linhas = [];\nlet totalGeral = 0;\n\nfor (let i = 0; i < itens.length; i++) {\n  const it = itens[i] || {};\n\n  if (it.produto) {\n    // ------- item de catálogo (Tabela 2026) -------\n    const r = calcularPrecoItem({\n      produto: it.produto,\n      quantidade: it.quantidade,\n      largura: it.largura,\n      altura: it.altura,\n    });\n    if (!r.ok) {\n      const erro = r.usar_placa\n        ? `item ${i + 1}: é placa personalizada — reenvie este item no formato de placa (material, tipo, largura, altura, quantidade), sem o campo 'produto'.`\n        : `item ${i + 1}: ${r.erro}`;\n      return [{ json: { ok:false, erro } }];\n    }\n    const descricao = String(it.descricao || r.nome).trim();\n    linhas.push({\n      n: i + 1, descricao,\n      caracteristicas: specsItem(r.produto, r),\n      quantidade: r.quantidade, unitario: r.unitario, total: r.total,\n      resumoTxt: `${r.quantidade}x ${r.nome} = ${brl(r.total)}`,\n    });\n    totalGeral += r.total;\n  } else {\n    // ------- placa personalizada -------\n    const r = calcularPrecoPlaca({\n      material: it.material,\n      tipo: it.tipo,\n      largura: it.largura,\n      altura: it.altura,\n      quantidade: it.quantidade,\n      placaEndereco: !!it.placa_endereco,\n    }, { exigirEspessuraPvc: true });\n    if (!r.ok) {\n      return [{ json: { ok:false, erro:`item ${i + 1}: ${r.erro}` } }];\n    }\n    if (!r.dentro_do_limite) {\n      return [{ json: { ok:false, erro:`item ${i + 1} (${r.material} ${r.altura_cm}x${r.largura_cm} cm) excede a chapa padrão. Encaminhe para um atendente humano (ferramenta transferir).` } }];\n    }\n    if (r.quantidade > 20) {\n      return [{ json: { ok:false, erro:`item ${i + 1}: quantidade acima de 20 unidades de placa. Encaminhe para um atendente humano (ferramenta transferir).` } }];\n    }\n    const descricao = String(it.descricao || `Placa de ${r.material}`).trim();\n    linhas.push({\n      n: i + 1, descricao,\n      caracteristicas: [\n        \"Forma: retangular\",\n        `Material: ${r.materialDesc}`,\n        `Acabamento: ${r.tipo}`,\n        `Dimensões: ${fmtDim(r.altura_cm)} x ${fmtDim(r.largura_cm)} cm (A x L)`,\n      ],\n      quantidade: r.quantidade, unitario: r.unitario, total: r.total,\n      resumoTxt: `${r.quantidade}x ${descricao} (${r.material} ${r.tipo}, ${r.altura_cm}x${r.largura_cm} cm) = ${brl(r.total)}`,\n    });\n    totalGeral += r.total;\n  }\n}\ntotalGeral = round2(totalGeral);\n\n// ============================ NÚMERO / DATA =================================\nconst agora = DateTime.now().setZone(\"America/Sao_Paulo\");\nconst dd = String(agora.day).padStart(2,\"0\");\nconst mm = String(agora.month).padStart(2,\"0\");\nconst yy = String(agora.year).slice(-2);\nconst hh = String(agora.hour).padStart(2,\"0\");\nconst mi = String(agora.minute).padStart(2,\"0\");\nconst ss = String(agora.second).padStart(2,\"0\");\nconst numeroProposta = `${dd}${mm}${yy}-${hh}${mi}${ss}`;\nconst MESES = [\"janeiro\",\"fevereiro\",\"março\",\"abril\",\"maio\",\"junho\",\"julho\",\"agosto\",\"setembro\",\"outubro\",\"novembro\",\"dezembro\"];\nconst dataExtenso = `${agora.day} de ${MESES[agora.month-1]} de ${agora.year}`;\nconst fileName = `Orcamento-${numeroProposta}.pdf`;\n\n// ============================ HTML ==========================================\nconst linhasHtml = linhas.map(l => `\n      <tr>\n        <td class=\"c\">${l.n}</td>\n        <td><strong>${esc(l.descricao)}</strong></td>\n        <td class=\"carac\">\n${l.caracteristicas.map(c => `          <div>&bull; ${esc(c)}</div>`).join(\"\\n\")}\n        </td>\n        <td class=\"c\">${l.quantidade}</td>\n        <td class=\"r\">${brl(l.unitario)}</td>\n        <td class=\"r\">${brl(l.total)}</td>\n      </tr>`).join(\"\");\n\n// Timbrado: usa as imagens oficiais se embutidas; senão, fallback em texto\nconst headerHtml = IMG_HEADER\n  ? `<img src=\"${IMG_HEADER}\" style=\"width:100%;display:block;margin-bottom:8px\" alt=\"Sinaliza Pro\">`\n  : `<div class=\"brand\">\n        <div class=\"logo\">SINALIZA<small>PRO</small></div>\n        <div class=\"contato\">\n          SINALIZA PRO COMUNICAÇÃO VISUAL LTDA<br>\n          CNPJ: 00.000.000/0000-00<br>\n          (11) 99999-0000 / (11) 99999-0000\n        </div>\n      </div>`;\n\nconst footerHtml = IMG_FOOTER\n  ? `<img src=\"${IMG_FOOTER}\" style=\"width:100%;display:block;margin-top:6mm\" alt=\"Contato Sinaliza Pro\">`\n  : `<div class=\"rodape\">\n        <strong>Fone: (11) 99999-0000</strong> &nbsp;|&nbsp; www.exemplo.com.br &nbsp;|&nbsp; email@exemplo.com<br>\n        Avenida Exemplo, nº 123 - Centro - Cidade Exemplo - UF - CEP: 00000-000 | CNPJ: 00.000.000/0000-00\n      </div>`;\n\nconst assinaturaHtml = IMG_ASSINATURA\n  ? `<img src=\"${IMG_ASSINATURA}\" style=\"width:72mm;display:block;margin:6px auto 0\" alt=\"Assinatura\">`\n  : `<div class=\"linha\"></div>\n    <div>Fulano de Tal</div>\n    <div>Sócio-Administrador</div>\n    <div>Departamento Comercial — Documento emitido eletronicamente</div>\n    <div class=\"empresa\">SINALIZA PRO COMUNICAÇÃO VISUAL LTDA<br>CNPJ: 00.000.000/0000-00</div>`;\n\nconst obsExtraHtml = observacoesExtra\n  ? `<li>${esc(observacoesExtra)}</li>` : \"\";\n\nconst prazoTxt = prazoProducao(totalGeral);\nconst prazoObs = prazoTxt.startsWith(\"a combinar\")\n  ? \"Prazo de produção: a combinar com o atendente;\"\n  : `Prazo de produção: ${prazoTxt} após a confirmação do pagamento;`;\n\nconst html = `<!DOCTYPE html>\n<html lang=\"pt-BR\">\n<head>\n<meta charset=\"utf-8\">\n<title>Proposta ${numeroProposta} - Sinaliza Pro</title>\n<style>\n  @page { size: A4; margin: 10mm 10mm 10mm 10mm; }\n  * { box-sizing: border-box; }\n  body { font-family: Arial, Helvetica, sans-serif; font-size: 10.5px; color: #222; margin: 0; }\n\n  /* moldura da página: thead/tfoot repetem em TODA página impressa (Chromium) */\n  table.moldura { width: 100%; border-collapse: collapse; }\n  table.moldura > thead { display: table-header-group; }\n  table.moldura > tfoot { display: table-footer-group; }\n  table.moldura > thead > tr > td, table.moldura > tbody > tr > td, table.moldura > tfoot > tr > td { padding: 0; }\n\n  .brand { display: flex; align-items: center; justify-content: space-between;\n           border-bottom: 4px solid #2ea58d; padding: 2mm 0 8px; margin-bottom: 10px; }\n  .brand .logo { font-size: 30px; font-weight: 800; color: #2ea58d; letter-spacing: 1px; }\n  .brand .logo small { display: block; font-size: 12px; font-weight: 700; letter-spacing: 6px; color: #2ea58d; }\n  .brand .contato { text-align: right; font-size: 10px; color: #444; line-height: 1.5; }\n\n  .rodape { background: #2ea58d; color: #fff; text-align: center; margin-top: 6mm;\n            padding: 3mm 6mm; font-size: 9.5px; line-height: 1.6; }\n\n  h1.titulo { text-align: center; font-size: 15px; margin: 6px 0 12px; letter-spacing: 1px; }\n\n  table.info { width: 100%; border-collapse: collapse; margin-bottom: 12px; }\n  table.info td { border: 1px solid #555; padding: 4px 8px; }\n  table.info td.rotulo { font-weight: 700; white-space: nowrap; width: 1%; background: #f2f2f2; }\n\n  table.itens { width: 100%; border-collapse: collapse; }\n  table.itens thead { display: table-header-group; }\n  table.itens th { background: #2ea58d; color: #fff; padding: 6px 4px; font-size: 10px; border: 1px solid #1f8a74; }\n  table.itens .faixa-titulo th { background: #fff; color: #2ea58d; font-size: 11.5px; letter-spacing: 1px; border: 1px solid #1f8a74; }\n  table.itens td { border: 1px solid #888; padding: 5px 6px; vertical-align: top; }\n  table.itens tr { page-break-inside: avoid; }\n  td.c { text-align: center; }\n  td.r { text-align: right; white-space: nowrap; }\n  td.carac div { margin: 1px 0; }\n  tr.total td { font-weight: 800; font-size: 11.5px; border: 1px solid #555; }\n  tr.total td.valor { background: #2ea58d; color: #fff; text-align: right; white-space: nowrap; }\n\n  .obs { margin-top: 16px; page-break-inside: avoid; }\n  .obs h2 { font-size: 12px; margin: 0 0 4px; }\n  .obs ul { margin: 0; padding-left: 18px; line-height: 1.7; }\n\n  .assinatura { margin-top: 30px; text-align: center; page-break-inside: avoid; }\n  .assinatura .data { text-align: left; margin-bottom: 28px; }\n  .assinatura .linha { width: 260px; border-top: 1px solid #333; margin: 0 auto 4px; }\n  .assinatura .empresa { margin-top: 14px; font-size: 9.5px; font-weight: 700; }\n</style>\n</head>\n<body>\n\n<table class=\"moldura\">\n  <thead>\n    <tr><td>${headerHtml}</td></tr>\n  </thead>\n  <tfoot>\n    <tr><td>${footerHtml}</td></tr>\n  </tfoot>\n  <tbody>\n    <tr><td>\n\n  <h1 class=\"titulo\">PROPOSTA ${numeroProposta}</h1>\n\n  <table class=\"info\">\n    <tr><td class=\"rotulo\">Cliente:</td><td>${esc(clienteNome)}</td></tr>\n    ${clienteDocumento ? `<tr><td class=\"rotulo\">CPF/CNPJ:</td><td>${esc(clienteDocumento)}</td></tr>` : \"\"}\n    ${clienteTelefone ? `<tr><td class=\"rotulo\">Contato:</td><td>${esc(clienteTelefone)}</td></tr>` : \"\"}\n  </table>\n\n  <table class=\"itens\">\n    <thead>\n      <tr class=\"faixa-titulo\"><th colspan=\"6\">ORÇAMENTO DE SINALIZAÇÃO</th></tr>\n      <tr>\n        <th style=\"width:4%\">Nº</th>\n        <th style=\"width:24%\">DESCRIÇÃO</th>\n        <th>CARACTERÍSTICAS</th>\n        <th style=\"width:7%\">QTD</th>\n        <th style=\"width:13%\">VALOR UNITÁRIO</th>\n        <th style=\"width:13%\">VALOR TOTAL</th>\n      </tr>\n    </thead>\n    <tbody>\n      ${linhasHtml}\n      <tr class=\"total\">\n        <td colspan=\"5\" style=\"text-align:right\">VALOR TOTAL DO ORÇAMENTO</td>\n        <td class=\"valor\">${brl(totalGeral)}</td>\n      </tr>\n    </tbody>\n  </table>\n\n  <div class=\"obs\">\n    <h2>Obs:</h2>\n    <ul>\n      <li>${prazoObs}</li>\n      <li>Pagamento: PIX (CNPJ) 00.000.000/0000-00;</li>\n      <li>Validade da proposta: 15 dias;</li>\n      <li>Retirada na loja após confirmação de que o pedido está pronto. Entrega terceirizada mediante taxa.</li>\n      ${obsExtraHtml}\n    </ul>\n  </div>\n\n  <div class=\"assinatura\">\n    <div class=\"data\">Cidade Exemplo, ${dataExtenso}.</div>\n    ${assinaturaHtml}\n  </div>\n\n    </td></tr>\n  </tbody>\n</table>\n\n</body>\n</html>`;\n\n// ============================ SAÍDA =========================================\nconst resumo = linhas.map(l => l.resumoTxt).join(\"; \");\n\nreturn [{\n  json: {\n    ok: true,\n    numero_proposta: numeroProposta,\n    fileName,\n    qtd_itens: linhas.length,\n    total: totalGeral,\n    valor_total: brl(totalGeral),\n    prazo_producao: prazoProducao(totalGeral),\n    resumo,\n  },\n  binary: {\n    arquivo_html: {\n      data: Buffer.from(html, \"utf-8\").toString(\"base64\"),\n      mimeType: \"text/html\",\n      fileName: \"index.html\",\n      fileExtension: \"html\",\n    },\n  },\n}];\n"
+      },
+      "id": "225da045-2bc7-4190-976b-b1bd6f25615e",
+      "name": "Montar orçamento (HTML)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-ok",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "28d6c444-48e5-4007-9799-4f8686ef25cd",
+      "name": "Orçamento válido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        528,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://gotenberg:3000/forms/chromium/convert/html",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "files",
+              "inputDataFieldName": "arquivo_html"
+            },
+            {
+              "name": "printBackground",
+              "value": "true"
+            },
+            {
+              "name": "preferCssPageSize",
+              "value": "true"
+            },
+            {
+              "name": "marginTop",
+              "value": "0"
+            },
+            {
+              "name": "marginBottom",
+              "value": "0"
+            },
+            {
+              "name": "marginLeft",
+              "value": "0"
+            },
+            {
+              "name": "marginRight",
+              "value": "0"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "52c569d1-1cad-4f69-822b-e076067e31f7",
+      "name": "HTML para PDF (Gotenberg)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        768,
+        544
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "name": "={{ $('Montar orçamento (HTML)').first().json.fileName }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive",
+          "cachedResultName": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list",
+          "cachedResultName": "propostas"
+        },
+        "options": {}
+      },
+      "id": "9467c53d-cf4b-49db-8dd8-e408cc4e7beb",
+      "name": "Upload PDF no Google Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        992,
+        544
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "share",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.id }}"
+        },
+        "permissionsUi": {
+          "permissionsValues": {
+            "role": "reader",
+            "type": "anyone"
+          }
+        },
+        "options": {}
+      },
+      "id": "7411210d-b0a2-4d19-9a4d-a7e25d4519a2",
+      "name": "Compartilhar por link (leitura)",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        1200,
+        544
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "",
+          "name": "Configurar credencial"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "ok",
+              "type": "boolean",
+              "value": true
+            },
+            {
+              "id": "a2",
+              "name": "link",
+              "type": "string",
+              "value": "=https://drive.google.com/uc?export=download&id={{ $('Upload PDF no Google Drive').first().json.id }}&ext=.pdf"
+            },
+            {
+              "id": "a3",
+              "name": "numero_proposta",
+              "type": "string",
+              "value": "={{ $('Montar orçamento (HTML)').first().json.numero_proposta }}"
+            },
+            {
+              "id": "a4",
+              "name": "valor_total",
+              "type": "string",
+              "value": "={{ $('Montar orçamento (HTML)').first().json.valor_total }}"
+            },
+            {
+              "id": "a5",
+              "name": "prazo_producao",
+              "type": "string",
+              "value": "={{ $('Montar orçamento (HTML)').first().json.prazo_producao }}"
+            },
+            {
+              "id": "a6",
+              "name": "mensagem",
+              "type": "string",
+              "value": "Orçamento em PDF gerado com sucesso. Envie o link ao cliente."
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "98dd333d-5a3f-4322-9d18-5c34a3552f71",
+      "name": "Return",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1456,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c1",
+              "name": "ok",
+              "type": "boolean",
+              "value": false
+            },
+            {
+              "id": "c2",
+              "name": "erro",
+              "type": "string",
+              "value": "=Falha técnica ao gerar o documento de orçamento ({{ $json.error?.message || 'erro interno' }}). Peça desculpas ao cliente, diga que vai providenciar o documento e encaminhe a um atendente humano. NÃO tente chamar a ferramenta de novo."
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c468fab8-d480-4b0b-8db2-1167decc8eb7",
+      "name": "Return erro técnico",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1392,
+        864
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b1",
+              "name": "ok",
+              "type": "boolean",
+              "value": false
+            },
+            {
+              "id": "b2",
+              "name": "erro",
+              "type": "string",
+              "value": "={{ $json.erro }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b89c1469-f152-4cb0-8e60-e6e313ae1974",
+      "name": "Return erro",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        768,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Tool: Gerar Orçamento PDF\n\n**O que faz:** recebe TODOS os itens de uma vez — placas personalizadas E itens de catálogo (Tabela 2026, campo `produto`) — recalcula os preços com o MESMO motor das ferramentas `calcular_preco_placa`/`calcular_preco_item`, monta o HTML da proposta, converte em PDF (Gotenberg), sobe no Google Drive e devolve `{ ok, link, numero_proposta, valor_total, prazo_producao }` para a Camila enviar ao cliente.\n\n**Manutenção:** a tabela de preços do node \"Montar orçamento (HTML)\" é a mesma das ferramentas `calcular_preco_placa` e `calcular_preco_item`. Ao alterar valores, atualize os três nodes.\n\n**Configurar:** 1) URL do Gotenberg no node HTTP; 2) credencial + pasta nos 2 nodes do Google Drive.",
+        "height": 320,
+        "width": 900,
+        "color": 5
+      },
+      "id": "3c3190f9-0794-402a-8bd6-8f0d170d57ee",
+      "name": "Sticky Note1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        96
+      ]
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Montar orçamento (HTML)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar orçamento (HTML)": {
+      "main": [
+        [
+          {
+            "node": "Orçamento válido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Orçamento válido?": {
+      "main": [
+        [
+          {
+            "node": "HTML para PDF (Gotenberg)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return erro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTML para PDF (Gotenberg)": {
+      "main": [
+        [
+          {
+            "node": "Upload PDF no Google Drive",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return erro técnico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload PDF no Google Drive": {
+      "main": [
+        [
+          {
+            "node": "Compartilhar por link (leitura)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return erro técnico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compartilhar por link (leitura)": {
+      "main": [
+        [
+          {
+            "node": "Return",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return erro técnico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}
